@@ -23,7 +23,14 @@
   - `orchestrator/context_packer.py` 早期版：task.title + 接力点原文（transcript range）+ input_memory_ids 精确产出，按 depends_on 顺序对齐，上游 skipped 显式注明（不做语义补充检索 / token budget，阶段 4c 落地）
   - scheduler 改用 context_packer 打包 prompt
   - **对比实验数据**（`recall-drift`）：input_memory_ids 精确取 = 100%；语义召回 top-1 = 29%（7 个 query 5 个飘走），top-3 = 86%。验证 spec §3.3 P0 判断
-  - 测试：105 个 case 全过（19s）
+
+- **阶段 4a（DAG 编排 + 失败模型 + 并发）**：✅ 完成
+  - `orchestrator/dag_loader.py`：DAG JSON 加载 + schema 校验 + 环检测 + 实例化（逻辑 id → DB node_id）
+  - `orchestrator/failure_handler.py`：spec §5.2 表落地——retry 路径清 pending → 重置 pending + `retry_count+1`；耗尽后按 policy 终态（`fail_retry`→failed，`fail_skip`→skipped，`fail_fast`→failed+取消兄弟）
+  - `orchestrator/scheduler.py` 重写：`asyncio.Semaphore(MAX_CONCURRENT_WORKERS=5)` 并发，节点失败走 FailureHandler；`fail_fast` 调 `sandbox.cancel`，5s 超时改 `destroy` 强杀；任务级失败后 cascade `skipped` 下游
+  - memory_store 加 collection 缓存 + lock（修并发 Chroma `get_or_create` 竞态）
+  - demo-phase4a：跑 spec §5.4 完整 DAG（3 并发 research → 2 writing → summarize，含 fail_skip / fail_retry / fail_fast 三种 policy）
+  - 测试：129 个 case 全过（19s）
 
 ## 运行
 
@@ -40,9 +47,13 @@ python -m orchestrator.main demo-phase2 --mock --reset
 # 阶段 3 双 Agent + 精确接力 demo
 python -m orchestrator.main demo-phase3 --mock --reset
 
+# 阶段 4a 完整 DAG demo（3 并发 → 2 写作 → 汇总）
+python -m orchestrator.main demo-phase4a --mock --reset
+python -m orchestrator.main demo-phase4a --mock --reset --fail-b  # 演示 fail_skip
+
 # 真实 Claude API
 export ANTHROPIC_API_KEY=...
-python -m orchestrator.main demo-phase3 --reset
+python -m orchestrator.main demo-phase4a --reset
 
 # 召回质量基线 / 飘移对比
 python -m orchestrator.main recall-baseline

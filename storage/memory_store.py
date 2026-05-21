@@ -67,6 +67,9 @@ class MemoryStore:
             path=str(persist_dir),
             settings=Settings(anonymized_telemetry=False, allow_reset=False),
         )
+        # 并发安全：缓存 collection；chromadb 0.4.15 的 get_or_create 不是线程安全的
+        self._coll_cache: dict[str, object] = {}
+        self._coll_lock = threading.Lock()
 
     async def add(
         self,
@@ -122,11 +125,18 @@ class MemoryStore:
 
     def _collection(self, user_id: str):
         _validate_user_id(user_id)
-        return self._client.get_or_create_collection(
-            name=f"mem_{user_id}",
-            embedding_function=_get_embedding_function(),
-            metadata={"hnsw:space": "cosine"},
-        )
+        if user_id in self._coll_cache:
+            return self._coll_cache[user_id]
+        with self._coll_lock:
+            if user_id in self._coll_cache:
+                return self._coll_cache[user_id]
+            coll = self._client.get_or_create_collection(
+                name=f"mem_{user_id}",
+                embedding_function=_get_embedding_function(),
+                metadata={"hnsw:space": "cosine"},
+            )
+            self._coll_cache[user_id] = coll
+            return coll
 
     def _add_sync(self, user_id: str, doc: str, metadata: dict[str, Any]) -> str:
         if not isinstance(doc, str) or not doc.strip():

@@ -1,36 +1,51 @@
-"""阶段 2/3 调度器：串行拓扑 + recovery + context_packer + writeback v2。
+"""阶段 4a 并发调度器（spec v4 §4.1 / §5 / §6 / §8）。
 
-阶段 4a 起会扩展为 ``asyncio`` 并发 + 完整失败模型；本模块只覆盖
-spec §11 阶段 2/3 验收所需的「串行 DAG + 精确接力」。
+主循环：
+
+- 启动前跑一次 ``recovery.sweep_all``
+- 每轮：扫所有 ready 节点 → 用 ``asyncio.Semaphore(MAX_CONCURRENT_WORKERS)``
+  并发拉起，每节点一个 ``asyncio.Task``
+- 节点失败 → ``FailureHandler.on_node_failed`` 决定重试 / skip / fail
+- ``fail_fast`` 重试耗尽 → 对所有 active 兄弟 ``sandbox.cancel``，5s 超时改 ``destroy``
+- 任务级失败 → 进入「收尾期」：等所有 active 收口，新一轮不再拉起，下游 pending 节点
+  按 spec §5.2 表全部标 ``skipped``
+
+阶段 4c 升级 context_packer 完整版 + token budget；阶段 4b 接 E2BBackend。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
 from typing import Callable
 
 from orchestrator.context_packer import ContextPacker
+from orchestrator.failure_handler import FailureHandler
 from orchestrator.recovery import Recovery
 from storage.memory_store import MemoryStore
 from storage.state_store import DagNodeRow, StateStore
 from storage.transcript_store import TranscriptStore
 from worker.agent import Agent, LLMClient
 from worker.heartbeat import HeartbeatTask
-from worker.sandbox import SandboxBackend
+from worker.sandbox import SandboxBackend, SandboxHandle
 from worker.writeback import writeback_turn
 
 _log = logging.getLogger(__name__)
+
+DEFAULT_MAX_CONCURRENT = 5  # spec §4.1
+CANCEL_TIMEOUT_SECONDS = 5.0  # spec §5.3
 
 
 @dataclass
 class NodeRunOutcome:
     node_id: str
-    final_status: str
+    final_status: str  # done/failed/skipped/cancelled
     output_memory_id: str | None
     agent_output: str | None
     packed_context: str | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -41,7 +56,6 @@ class TaskContext:
 
 
 SubTaskBuilder = Callable[[DagNodeRow, TaskContext], str]
-"""返回该节点的「子任务说明」，将作为 context_packer 打包结果的 ``# 子任务`` 段。"""
 
 
 class Scheduler:
@@ -55,8 +69,11 @@ class Scheduler:
         llm_client: LLMClient,
         recovery: Recovery,
         context_packer: ContextPacker,
+        failure_handler: FailureHandler,
         sub_task_builder: SubTaskBuilder,
+        max_concurrent_workers: int = DEFAULT_MAX_CONCURRENT,
         heartbeat_interval: float = 30.0,
+        cancel_timeout: float = CANCEL_TIMEOUT_SECONDS,
     ) -> None:
         self._state_store = state_store
         self._transcript_store = transcript_store
@@ -65,8 +82,11 @@ class Scheduler:
         self._llm = llm_client
         self._recovery = recovery
         self._packer = context_packer
+        self._failure = failure_handler
         self._sub_task_builder = sub_task_builder
+        self._semaphore = asyncio.Semaphore(max_concurrent_workers)
         self._heartbeat_interval = heartbeat_interval
+        self._cancel_timeout = cancel_timeout
 
     async def run_task(self, task_id: str) -> str:
         await self._recovery.sweep_all()
@@ -77,18 +97,110 @@ class Scheduler:
         await self._state_store.update_task_status(task_id, "running")
         ctx = TaskContext(task_id=task_id, user_id=task.user_id, title=task.title)
 
+        # 持有 active node 的 asyncio.Task + sandbox handle，便于 fail_fast 取消
+        active_tasks: dict[str, asyncio.Task] = {}
+        active_handles: dict[str, SandboxHandle] = {}
+        cancelled = False
+        outcomes: dict[str, NodeRunOutcome] = {}
+
         while True:
+            if cancelled:
+                # 任务级失败：把所有 pending 下游 cascade 到 skipped
+                await self._cascade_skip_downstream(task_id)
+
             nodes = await self._state_store.list_dag_nodes(task_id)
-            if self._all_terminal(nodes):
+            if self._all_terminal(nodes) and not active_tasks:
                 break
-            ready = self._find_ready(nodes)
-            if not ready:
-                pending_left = [n for n in nodes if n.status == "pending"]
-                raise RuntimeError(
-                    f"deadlock: {len(pending_left)} pending node(s) have unmet deps"
-                )
-            for node in ready:  # 阶段 2/3 串行；阶段 4a 改并发
-                await self._execute_node(node, nodes, ctx)
+
+            if not cancelled:
+                ready = self._find_ready(nodes)
+                for node in ready:
+                    if node.id in active_tasks:
+                        continue
+                    t = asyncio.create_task(
+                        self._run_one_node(node, ctx, active_handles),
+                        name=f"node:{node.id}",
+                    )
+                    active_tasks[node.id] = t
+
+                if not active_tasks:
+                    pending_left = [n for n in nodes if n.status == "pending"]
+                    if pending_left:
+                        raise RuntimeError(
+                            f"deadlock: {len(pending_left)} pending node(s) have unmet deps"
+                        )
+                    break
+
+            if not active_tasks:
+                # cancelled 模式 + 没活的 task → cascade 已跑完，下一轮顶部 break
+                continue
+
+            done, _pending = await asyncio.wait(
+                active_tasks.values(), return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for finished_task in done:
+                node_id = self._task_to_node_id(active_tasks, finished_task)
+                if node_id is None:
+                    continue
+                active_tasks.pop(node_id, None)
+                active_handles.pop(node_id, None)
+
+                try:
+                    outcome = finished_task.result()
+                except asyncio.CancelledError:
+                    _log.info("node task %s was cancelled", node_id)
+                    # cancel 路径下 _execute_node 没机会落终态，DB 里仍 running
+                    db_node = await self._state_store.get_dag_node(node_id)
+                    if db_node and db_node.status == "running":
+                        await self._state_store.mark_node_terminal(
+                            node_id, "skipped"
+                        )
+                    outcomes[node_id] = NodeRunOutcome(
+                        node_id=node_id,
+                        final_status="cancelled",
+                        output_memory_id=None,
+                        agent_output=None,
+                    )
+                    continue
+                except Exception as e:  # noqa: BLE001
+                    _log.exception("node task %s crashed: %s", node_id, e)
+                    outcome = NodeRunOutcome(
+                        node_id=node_id,
+                        final_status="failed",
+                        output_memory_id=None,
+                        agent_output=None,
+                        error=str(e),
+                    )
+
+                outcomes[node_id] = outcome
+
+                if outcome.final_status == "failed":
+                    failed_node = await self._state_store.get_dag_node(node_id)
+                    if failed_node is None:
+                        continue
+                    action = await self._failure.on_node_failed(failed_node)
+
+                    if action.cancel_siblings and not cancelled:
+                        cancelled = True
+                        _log.info(
+                            "fail_fast cancellation triggered by node=%s; "
+                            "cancelling %d siblings",
+                            node_id,
+                            len(active_tasks),
+                        )
+                        await self._cancel_active(active_tasks, active_handles)
+
+                    if action.task_should_fail and not cancelled:
+                        # 标 task failed 但不取消兄弟（fail_retry 重试耗尽路径）
+                        # 兄弟跑完即停（下一轮 cancelled=False 但 ready=空 + 下游全部 skipped）
+                        cancelled = True
+                        _log.info(
+                            "task-level failure from node=%s; entering drain mode",
+                            node_id,
+                        )
+
+                # done / skipped 路径正常走，下一轮调度
 
         final = self._task_final_status(
             await self._state_store.list_dag_nodes(task_id)
@@ -96,10 +208,34 @@ class Scheduler:
         await self._state_store.update_task_status(task_id, final)
         return final
 
-    async def _execute_node(
-        self, node: DagNodeRow, all_nodes: list[DagNodeRow], ctx: TaskContext
+    @staticmethod
+    def _task_to_node_id(
+        active_tasks: dict[str, asyncio.Task], finished: asyncio.Task
+    ) -> str | None:
+        for nid, t in active_tasks.items():
+            if t is finished:
+                return nid
+        return None
+
+    # ---- 单节点执行 ----
+
+    async def _run_one_node(
+        self,
+        node: DagNodeRow,
+        ctx: TaskContext,
+        active_handles: dict[str, SandboxHandle],
     ) -> NodeRunOutcome:
-        # spec §3.3 / §8.1：按 depends_on 顺序填 input_memory_ids（含 None 占位）
+        async with self._semaphore:
+            return await self._execute_node(node, ctx, active_handles)
+
+    async def _execute_node(
+        self,
+        node: DagNodeRow,
+        ctx: TaskContext,
+        active_handles: dict[str, SandboxHandle],
+    ) -> NodeRunOutcome:
+        # 按 depends_on 顺序填 input_memory_ids（含 None 占位，spec §8.1）
+        all_nodes = await self._state_store.list_dag_nodes(ctx.task_id)
         node_map = {n.id: n for n in all_nodes}
         upstream_mids: list[str | None] = []
         for dep_id in node.depends_on:
@@ -124,9 +260,7 @@ class Scheduler:
                 agent_output=None,
             )
 
-        # 重新读 node 以拿到刚写入的 input_memory_ids
         node = await self._state_store.get_dag_node(node.id) or node
-
         sub_task = self._sub_task_builder(node, ctx)
         packed = await self._packer.pack(
             task_id=ctx.task_id,
@@ -134,6 +268,7 @@ class Scheduler:
             sub_task_description=sub_task,
         )
         handle = await self._sandbox.create(context_package=packed.text)
+        active_handles[node.id] = handle
 
         agent = Agent(agent_id=node.node_name, client=self._llm)
         try:
@@ -156,7 +291,6 @@ class Scheduler:
                     agent_output=agent_output,
                 )
                 if not result.committed:
-                    _log.warning("commit aborted for node=%s", node.id)
                     return NodeRunOutcome(
                         node_id=node.id,
                         final_status="aborted",
@@ -171,18 +305,65 @@ class Scheduler:
                     agent_output=agent_output,
                     packed_context=packed.text,
                 )
+        except asyncio.CancelledError:
+            _log.info("node %s execution cancelled mid-flight", node.id)
+            # 让 finally 跑 destroy
+            raise
         except Exception as e:  # noqa: BLE001
             _log.exception("node %s raised: %s", node.id, e)
-            await self._state_store.mark_node_terminal(node.id, "failed")
             return NodeRunOutcome(
                 node_id=node.id,
                 final_status="failed",
                 output_memory_id=None,
                 agent_output=None,
                 packed_context=packed.text,
+                error=str(e),
             )
         finally:
-            await self._sandbox.destroy(handle)
+            try:
+                await self._sandbox.destroy(handle)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("destroy handle for node=%s failed: %s", node.id, e)
+
+    # ---- 取消并发兄弟 ----
+
+    async def _cancel_active(
+        self,
+        active_tasks: dict[str, asyncio.Task],
+        active_handles: dict[str, SandboxHandle],
+    ) -> None:
+        """spec §5.3：先调 sandbox.cancel，超时改 destroy 强杀。"""
+        for nid, handle in list(active_handles.items()):
+            try:
+                ok = await self._sandbox.cancel(handle, timeout=self._cancel_timeout)
+                if not ok:
+                    _log.warning(
+                        "cancel timed out for node=%s; forcing destroy", nid
+                    )
+                    await self._sandbox.destroy(handle)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("cancel/destroy node=%s failed: %s", nid, e)
+        # 同时 cancel 兄弟 asyncio.Task（让 await 点抛出 CancelledError）
+        for t in active_tasks.values():
+            t.cancel()
+
+    # ---- cascade skip ----
+
+    async def _cascade_skip_downstream(self, task_id: str) -> None:
+        """任务级失败后：所有 pending 节点链式标 skipped。"""
+        # 多轮直到稳定（一个节点 skip 后可能解锁下游可 skip）
+        while True:
+            nodes = await self._state_store.list_dag_nodes(task_id)
+            changed = False
+            for n in nodes:
+                if n.status != "pending":
+                    continue
+                await self._failure.on_dependency_terminal_failed(n)
+                changed = True
+            if not changed:
+                break
+
+    # ---- DAG helpers ----
 
     @staticmethod
     def _all_terminal(nodes: list[DagNodeRow]) -> bool:

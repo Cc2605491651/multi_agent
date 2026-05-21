@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from orchestrator.context_packer import ContextPacker
+from orchestrator.dag_loader import instantiate_dag, load_dag
+from orchestrator.failure_handler import FailureHandler
 from orchestrator.recovery import Recovery
 from orchestrator.scheduler import Scheduler
 from storage.memory_store import MemoryStore
@@ -369,6 +371,7 @@ async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
         llm_client=client,
         recovery=recovery,
         context_packer=packer,
+        failure_handler=FailureHandler(state_store, memory_store),
         sub_task_builder=_phase2_sub_task,
         heartbeat_interval=2.0,
     )
@@ -616,6 +619,7 @@ async def run_demo_phase3(*, mock: bool, reset: bool) -> int:
         llm_client=client,
         recovery=recovery,
         context_packer=packer,
+        failure_handler=FailureHandler(state_store, memory_store),
         sub_task_builder=_phase3_sub_task,
         heartbeat_interval=2.0,
     )
@@ -649,6 +653,124 @@ async def run_demo_phase3(*, mock: bool, reset: bool) -> int:
     return 0 if final == "done" else 1
 
 
+# ============ 阶段 4a demo：spec §5.4 完整 DAG ============
+
+_PHASE4A_TASK_TITLE = "多源调研 + 双写作 + 汇总 demo（spec §5.4）"
+
+_PHASE4A_MOCK_OUTPUTS = {
+    "research_a": "调研 A：A 工具开源、本地部署、年成本 30 万。",
+    "research_b": "（research_b 通常应失败 → fail_skip → 下游 writing_b 拿不到产出）",
+    "research_c": "调研 C：C 工具云端 SaaS、年 20 万、不支持本地。",
+    "writing_a": "基于 research_a 写出：A 工具是首选，开源且符合预算。",
+    "writing_b": "基于 research_b 写出：调研 B 缺失，本节段建议另起调研。",
+    "summarize": "汇总：综合 research_c + writing_a + writing_b 给出最终决策。选 A 工具。",
+}
+
+
+def _phase4a_sub_task(node, ctx) -> str:
+    return f"[node:{node.node_name}] 完成 {ctx.title} 的「{node.node_name}」子任务"
+
+
+async def run_demo_phase4a(*, mock: bool, reset: bool, fail_b: bool) -> int:
+    if reset:
+        import shutil
+
+        for p in (TRANSCRIPT_DB, CHROMA_DIR, STATE_DB):
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    transcript_store = TranscriptStore(TRANSCRIPT_DB)
+    memory_store = MemoryStore(CHROMA_DIR)
+    state_store = StateStore(STATE_DB)
+    sandbox = LocalBackend()
+    recovery = Recovery(state_store, memory_store, stale_seconds=300)
+    packer = ContextPacker(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+    )
+
+    if mock:
+        # 用一个增强 mock：可对 research_b 抛错以演示 fail_skip
+        @dataclass
+        class _Phase4aClient:
+            chat_map: dict[str, str]
+            fail_nodes: set[str]
+
+            async def complete(self, *, model: str, system: str, messages, max_tokens=1024):
+                text = messages[-1]["content"]
+                if "提炼员" in system:
+                    tag = "【Agent 输出】"
+                    if tag in text:
+                        tail = text.split(tag, 1)[1]
+                        for stop in ("\n\n请按", "\n请按", "【"):
+                            if stop in tail:
+                                tail = tail.split(stop, 1)[0]
+                                break
+                        return tail.strip()[:160]
+                    return text.strip()[:160]
+                for nname in self.fail_nodes:
+                    if f"[node:{nname}]" in text:
+                        raise RuntimeError(f"scripted failure for {nname}")
+                for nname, out in self.chat_map.items():
+                    if f"[node:{nname}]" in text:
+                        return out
+                return "default"
+
+        fail_set = {"research_b"} if fail_b else set()
+        client = _Phase4aClient(
+            chat_map=_PHASE4A_MOCK_OUTPUTS, fail_nodes=fail_set
+        )
+        print(f"[demo4a] running with --mock  fail_b={fail_b}")
+    else:
+        try:
+            client = default_client()
+        except RuntimeError as e:
+            print(f"[demo4a] {e}", file=sys.stderr)
+            return 2
+        print("[demo4a] running with real Claude API")
+
+    user_id = "default_user"
+    dag_path = Path(__file__).resolve().parent.parent / "dags" / "research_report.json"
+    dag = load_dag(dag_path)
+    print(f"[demo4a] loaded DAG: {dag.dag_id} ({len(dag.nodes)} nodes)")
+
+    task_id, mapping = await instantiate_dag(
+        state_store, dag, user_id=user_id, title=_PHASE4A_TASK_TITLE
+    )
+    print(f"[demo4a] task={task_id}")
+    for logical_id, node_id in mapping.items():
+        print(f"   {logical_id} → {node_id}")
+
+    scheduler = Scheduler(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+        sandbox=sandbox,
+        llm_client=client,
+        recovery=recovery,
+        context_packer=packer,
+        failure_handler=FailureHandler(state_store, memory_store),
+        sub_task_builder=_phase4a_sub_task,
+        max_concurrent_workers=3,
+        heartbeat_interval=2.0,
+        cancel_timeout=2.0,
+    )
+    final = await scheduler.run_task(task_id)
+    print(f"\n[demo4a] task 最终状态: {final}\n")
+
+    print("节点最终状态：")
+    for n in await state_store.list_dag_nodes(task_id):
+        print(
+            f"  - {n.node_name:12s}  status={n.status:8s}  retry={n.retry_count}  "
+            f"policy={n.failure_policy:11s}  mem={n.output_memory_id}"
+        )
+    return 0 if final == "done" else 1
+
+
 # ============ CLI 入口 ============
 
 
@@ -668,6 +790,16 @@ def main() -> int:
     p_demo3.add_argument("--mock", action="store_true")
     p_demo3.add_argument("--reset", action="store_true")
 
+    p_demo4a = sub.add_parser(
+        "demo-phase4a", help="阶段 4a 完整 DAG（spec §5.4）+ 失败模型 + 并发"
+    )
+    p_demo4a.add_argument("--mock", action="store_true")
+    p_demo4a.add_argument("--reset", action="store_true")
+    p_demo4a.add_argument(
+        "--fail-b", action="store_true",
+        help="模拟 research_b 一直失败，演示 fail_skip 跳过 + 下游照常跑",
+    )
+
     p_recall = sub.add_parser("recall-baseline", help="阶段 1 任务 1.11 召回基线")
     p_recall.add_argument("-k", type=int, default=5)
 
@@ -683,6 +815,12 @@ def main() -> int:
         return asyncio.run(run_demo_phase2(mock=args.mock, reset=args.reset))
     if args.cmd == "demo-phase3":
         return asyncio.run(run_demo_phase3(mock=args.mock, reset=args.reset))
+    if args.cmd == "demo-phase4a":
+        return asyncio.run(
+            run_demo_phase4a(
+                mock=args.mock, reset=args.reset, fail_b=args.fail_b
+            )
+        )
     if args.cmd == "recall-baseline":
         return asyncio.run(run_recall_baseline(k=args.k))
     if args.cmd == "recall-drift":

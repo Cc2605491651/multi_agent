@@ -104,6 +104,22 @@ class MemoryStore:
     ) -> None:
         await asyncio.to_thread(self._update_status_sync, user_id, mem_id, status)
 
+    async def delete(self, user_id: str, mem_ids: list[str]) -> int:
+        """硬删一组记忆。recovery 类 1 / 类 3 用。返回删除条数。"""
+        return await asyncio.to_thread(self._delete_sync, user_id, mem_ids)
+
+    async def list_pending_for_node(
+        self, user_id: str, node_id: str
+    ) -> list[dict]:
+        """recovery 用：列某节点产出且仍 ``status=pending`` 的记忆。"""
+        return await asyncio.to_thread(
+            self._list_pending_for_node_sync, user_id, node_id
+        )
+
+    async def get_status(self, user_id: str, mem_id: str) -> str | None:
+        """recovery 类 2 用：取单条记忆当前 status；记忆不存在返回 None。"""
+        return await asyncio.to_thread(self._get_status_sync, user_id, mem_id)
+
     def _collection(self, user_id: str):
         _validate_user_id(user_id)
         return self._client.get_or_create_collection(
@@ -201,3 +217,34 @@ class MemoryStore:
             raise ValueError(f"invalid status: {status}")
         coll = self._collection(user_id)
         coll.update(ids=[mem_id], metadatas=[{"status": status}])
+
+    def _delete_sync(self, user_id: str, mem_ids: list[str]) -> int:
+        if not mem_ids:
+            return 0
+        coll = self._collection(user_id)
+        coll.delete(ids=list(mem_ids))
+        return len(mem_ids)
+
+    def _list_pending_for_node_sync(
+        self, user_id: str, node_id: str
+    ) -> list[dict]:
+        coll = self._collection(user_id)
+        res = coll.get(
+            where={
+                "$and": [
+                    {"produced_by_node": node_id},
+                    {"status": "pending"},
+                ]
+            }
+        )
+        out: list[dict] = []
+        for mid, doc, meta in zip(res["ids"], res["documents"], res["metadatas"]):
+            out.append({"id": mid, "document": doc, "metadata": dict(meta)})
+        return out
+
+    def _get_status_sync(self, user_id: str, mem_id: str) -> str | None:
+        coll = self._collection(user_id)
+        res = coll.get(ids=[mem_id])
+        if not res["ids"]:
+            return None
+        return res["metadatas"][0].get("status")

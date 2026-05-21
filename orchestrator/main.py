@@ -17,14 +17,18 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchestrator.recovery import Recovery
+from orchestrator.scheduler import Scheduler
 from storage.memory_store import MemoryStore
+from storage.state_store import StateStore
 from storage.transcript_store import TranscriptStore
 from worker.agent import Agent, default_client
-from worker.writeback import writeback_turn
+from worker.sandbox import LocalBackend
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TRANSCRIPT_DB = DATA_DIR / "transcript.db"
 CHROMA_DIR = DATA_DIR / "chroma"
+STATE_DB = DATA_DIR / "state.db"
 
 DEMO_TURNS: list[tuple[str, str]] = [
     # (user_input, mock_agent_output) —— mock 模式下用第二项；真实模式只用第一项
@@ -121,19 +125,29 @@ async def run_demo_phase1(*, mock: bool, reset: bool) -> int:
         history.append({"role": "user", "content": user_input})
         history.append({"role": "assistant", "content": agent_output})
 
-        result = await writeback_turn(
-            transcript_store=transcript_store,
-            memory_store=memory_store,
-            agent=agent,
-            user_id=user_id,
-            task_id=task_id,
+        # 阶段 1 简化：transcript + memory(active) 直写，不走 §6.2 三步顺序
+        await transcript_store.add_turn(
             conversation_id=conversation_id,
             turn_index=i,
             user_input=user_input,
             agent_output=agent_output,
+            agent_id=agent.agent_id,
         )
-        if result.memory_id:
-            print(f"[memory extracted] {result.memory_doc!r}  (mem_id={result.memory_id})")
+        doc = await agent.distill(user_input, agent_output)
+        if doc:
+            mem_id = await memory_store.add(
+                user_id,
+                doc,
+                {
+                    "task_id": task_id,
+                    "source_conversation_id": conversation_id,
+                    "source_turn_index": i,
+                    "produced_by_agent": agent.agent_id,
+                    "produced_by_node": "",
+                    "memory_level": "node_output",
+                },
+            )
+            print(f"[memory extracted] {doc!r}  (mem_id={mem_id})")
         else:
             print("[memory] (skipped — 提炼空)")
 
@@ -247,20 +261,154 @@ async def run_recall_baseline(*, k: int = 5) -> int:
     return 0
 
 
+# ============ 阶段 2 demo：串行 2 节点 DAG ============
+
+_PHASE2_TASK_TITLE = "调研并撰写：橘猫米饭的居家护理 3 条要点"
+
+_PHASE2_MOCK_OUTPUTS = {
+    "research": (
+        "1) 橘猫消化敏感，固定时间投喂、品牌不轻易切换；"
+        "2) 室内放置抓板，减少夜间抓门频率；"
+        "3) 每年一次体检，重点查泌尿系统。"
+    ),
+    "writing": (
+        "建议：固定喂食习惯（同品牌定时定量）、配置抓板转移夜间精力、"
+        "每年体检关注泌尿——这三件事覆盖了橘猫米饭最常见的居家风险点。"
+    ),
+}
+
+
+@dataclass
+class _Phase2MockClient:
+    """按 user_input 里 [node:xxx] 标识返回不同 mock 输出。"""
+
+    chat_outputs: dict[str, str]
+
+    async def complete(self, *, model: str, system: str, messages, max_tokens=1024):
+        if "提炼员" in system:
+            content = messages[-1]["content"]
+            tag = "【用户输入】"
+            if tag in content:
+                content = content.split(tag, 1)[1].split("【", 1)[0]
+            content = content.strip()
+            if not content:
+                return ""
+            return content[:60]
+        # chat 调用：从 user message 里挖出 [node:xxx]
+        text = messages[-1]["content"]
+        for key, out in self.chat_outputs.items():
+            if f"[node:{key}]" in text:
+                return out
+        return "（mock 默认回复）"
+
+
+def _phase2_prompt_builder(node, input_mems, ctx) -> str:
+    if node.node_name == "research":
+        return (
+            f"[node:research] 围绕任务「{ctx.title}」给出 3 条最关键的护理事实，"
+            f"每条不超过 20 字。"
+        )
+    if node.node_name == "writing":
+        bg = "\n".join(f"- {m['document']}" for m in input_mems) or "（无上游产出）"
+        return (
+            f"[node:writing] 任务：{ctx.title}\n\n"
+            f"## 调研结论\n{bg}\n\n"
+            f"请综合写一段 100 字内的护理建议。"
+        )
+    return f"[node:{node.node_name}] 完成你的子任务"
+
+
+async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
+    if reset:
+        import shutil
+
+        for p in (TRANSCRIPT_DB, CHROMA_DIR, STATE_DB):
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    transcript_store = TranscriptStore(TRANSCRIPT_DB)
+    memory_store = MemoryStore(CHROMA_DIR)
+    state_store = StateStore(STATE_DB)
+    sandbox = LocalBackend()
+    recovery = Recovery(state_store, memory_store, stale_seconds=300)
+
+    if mock:
+        client = _Phase2MockClient(chat_outputs=_PHASE2_MOCK_OUTPUTS)
+        print("[demo2] running with --mock")
+    else:
+        try:
+            client = default_client()
+        except RuntimeError as e:
+            print(f"[demo2] {e}", file=sys.stderr)
+            return 2
+        print("[demo2] running with real Claude API")
+
+    user_id = "default_user"
+    task_id = await state_store.create_task(
+        user_id=user_id, title=_PHASE2_TASK_TITLE, dag_id="phase2_simple"
+    )
+    n_research = await state_store.create_dag_node(
+        task_id=task_id, node_name="research"
+    )
+    n_writing = await state_store.create_dag_node(
+        task_id=task_id, node_name="writing", depends_on=[n_research]
+    )
+    print(f"[demo2] task={task_id} | nodes: research={n_research}  writing={n_writing}")
+
+    scheduler = Scheduler(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+        sandbox=sandbox,
+        llm_client=client,
+        recovery=recovery,
+        prompt_builder=_phase2_prompt_builder,
+        heartbeat_interval=2.0,
+    )
+    final = await scheduler.run_task(task_id)
+    print(f"\n[demo2] task final status: {final}")
+
+    nodes = await state_store.list_dag_nodes(task_id)
+    for n in nodes:
+        print(
+            f"  - {n.node_name}: status={n.status}  retry={n.retry_count}  "
+            f"mem={n.output_memory_id}"
+        )
+
+    print("\n[demo2] 记忆库内容（active）：")
+    hits = await memory_store.search("护理建议", user_id, task_id, k=5)
+    for h in hits:
+        sim = 1.0 - h["distance"]
+        print(f"  sim={sim:.3f}  {h['document']}")
+    return 0 if final == "done" else 1
+
+
+# ============ CLI 入口 ============
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="orchestrator")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_demo = sub.add_parser("demo-phase1", help="阶段 1 端到端 demo（spec §11）")
-    p_demo.add_argument("--mock", action="store_true", help="用 stub LLM 不打 API")
-    p_demo.add_argument("--reset", action="store_true", help="跑前清空 data/transcript.db & chroma")
+    p_demo1 = sub.add_parser("demo-phase1", help="阶段 1 端到端 demo")
+    p_demo1.add_argument("--mock", action="store_true")
+    p_demo1.add_argument("--reset", action="store_true")
 
-    p_recall = sub.add_parser("recall-baseline", help="阶段 1 任务 1.11 召回质量摸底")
+    p_demo2 = sub.add_parser("demo-phase2", help="阶段 2 串行 2 节点 DAG（spec §11）")
+    p_demo2.add_argument("--mock", action="store_true")
+    p_demo2.add_argument("--reset", action="store_true")
+
+    p_recall = sub.add_parser("recall-baseline", help="阶段 1 任务 1.11 召回基线")
     p_recall.add_argument("-k", type=int, default=5)
 
     args = parser.parse_args()
     if args.cmd == "demo-phase1":
         return asyncio.run(run_demo_phase1(mock=args.mock, reset=args.reset))
+    if args.cmd == "demo-phase2":
+        return asyncio.run(run_demo_phase2(mock=args.mock, reset=args.reset))
     if args.cmd == "recall-baseline":
         return asyncio.run(run_recall_baseline(k=args.k))
     return 1

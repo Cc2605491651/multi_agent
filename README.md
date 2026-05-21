@@ -9,9 +9,15 @@
   - `storage/memory_store.py`：Chroma per-user collection + `bge-small-zh-v1.5` / 512 维 + status / cross_task 过滤
   - `worker/sandbox.py`：`SandboxBackend` 抽象 + `LocalBackend`（阶段 4 加 E2BBackend 零改动）
   - `worker/agent.py`：Claude Sonnet 主对话 / Haiku 提炼 + 可 stub 的 `LLMClient` 协议
-  - `worker/writeback.py`：阶段 1 简化版（直接 active；阶段 2 升级为 pending → active 三步）
-  - `orchestrator/main.py`：CLI `demo-phase1` / `recall-baseline`
-  - 测试：60 个 case 全过；召回基线 P@5 = 1.00 / MRR = 0.90（45 query × 20 docs）
+  - 召回基线 P@5 = 1.00 / MRR = 0.90（45 query × 20 docs）
+
+- **阶段 2（状态库 + 回写原子性 + 崩溃恢复）**：✅ 完成
+  - `storage/state_store.py`：tasks + dag_nodes（字段一次到位），WAL 模式，三类 recovery 查询入口
+  - `worker/writeback.py` v2：spec §6.2 三步顺序——transcript → pending memory → 状态库事务（唯一提交点）→ Chroma update active
+  - `worker/heartbeat.py`：`HeartbeatTask` async context manager，每 30s 上报
+  - `orchestrator/recovery.py`：spec §6.3 三类扫描全部实现 + 幂等性
+  - `orchestrator/scheduler.py`：串行拓扑调度（阶段 4a 升级为并发 + 失败模型）
+  - 测试：92 个 case 全过（13s），覆盖故障注入（writeback 第 2 步后崩、第 3 步 Chroma 失败、终态节点 pending 残留）
 
 ## 运行
 
@@ -19,12 +25,15 @@
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 端到端 demo（mock，不打 API）
+# 阶段 1 端到端 demo（mock，不打 API）
 python -m orchestrator.main demo-phase1 --mock --reset
+
+# 阶段 2 串行 2 节点 DAG demo
+python -m orchestrator.main demo-phase2 --mock --reset
 
 # 真实 Claude API
 export ANTHROPIC_API_KEY=...
-python -m orchestrator.main demo-phase1 --reset
+python -m orchestrator.main demo-phase2 --reset
 
 # 召回质量基线
 python -m orchestrator.main recall-baseline

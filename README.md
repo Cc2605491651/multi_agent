@@ -17,7 +17,13 @@
   - `worker/heartbeat.py`：`HeartbeatTask` async context manager，每 30s 上报
   - `orchestrator/recovery.py`：spec §6.3 三类扫描全部实现 + 幂等性
   - `orchestrator/scheduler.py`：串行拓扑调度（阶段 4a 升级为并发 + 失败模型）
-  - 测试：92 个 case 全过（13s），覆盖故障注入（writeback 第 2 步后崩、第 3 步 Chroma 失败、终态节点 pending 残留）
+  - 覆盖故障注入（writeback 第 2 步后崩、第 3 步 Chroma 失败、终态节点 pending 残留）
+
+- **阶段 3（双 Agent + 精确接力）**：✅ 完成
+  - `orchestrator/context_packer.py` 早期版：task.title + 接力点原文（transcript range）+ input_memory_ids 精确产出，按 depends_on 顺序对齐，上游 skipped 显式注明（不做语义补充检索 / token budget，阶段 4c 落地）
+  - scheduler 改用 context_packer 打包 prompt
+  - **对比实验数据**（`recall-drift`）：input_memory_ids 精确取 = 100%；语义召回 top-1 = 29%（7 个 query 5 个飘走），top-3 = 86%。验证 spec §3.3 P0 判断
+  - 测试：105 个 case 全过（19s）
 
 ## 运行
 
@@ -31,12 +37,16 @@ python -m orchestrator.main demo-phase1 --mock --reset
 # 阶段 2 串行 2 节点 DAG demo
 python -m orchestrator.main demo-phase2 --mock --reset
 
+# 阶段 3 双 Agent + 精确接力 demo
+python -m orchestrator.main demo-phase3 --mock --reset
+
 # 真实 Claude API
 export ANTHROPIC_API_KEY=...
-python -m orchestrator.main demo-phase2 --reset
+python -m orchestrator.main demo-phase3 --reset
 
-# 召回质量基线
+# 召回质量基线 / 飘移对比
 python -m orchestrator.main recall-baseline
+python -m orchestrator.main recall-drift
 
 # 测试
 pytest -v

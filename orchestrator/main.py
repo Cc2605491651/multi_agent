@@ -17,6 +17,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchestrator.context_packer import ContextPacker
 from orchestrator.recovery import Recovery
 from orchestrator.scheduler import Scheduler
 from storage.memory_store import MemoryStore
@@ -287,13 +288,18 @@ class _Phase2MockClient:
     async def complete(self, *, model: str, system: str, messages, max_tokens=1024):
         if "提炼员" in system:
             content = messages[-1]["content"]
-            tag = "【用户输入】"
+            tag = "【Agent 输出】"
             if tag in content:
-                content = content.split(tag, 1)[1].split("【", 1)[0]
-            content = content.strip()
+                tail = content.split(tag, 1)[1]
+                # 截掉 distill prompt 末尾固定的「请按要求...」尾巴
+                for stop in ("\n\n请按", "\n请按", "【"):
+                    if stop in tail:
+                        tail = tail.split(stop, 1)[0]
+                        break
+                content = tail.strip()
             if not content:
                 return ""
-            return content[:60]
+            return content[:160]
         # chat 调用：从 user message 里挖出 [node:xxx]
         text = messages[-1]["content"]
         for key, out in self.chat_outputs.items():
@@ -302,20 +308,12 @@ class _Phase2MockClient:
         return "（mock 默认回复）"
 
 
-def _phase2_prompt_builder(node, input_mems, ctx) -> str:
+def _phase2_sub_task(node, ctx) -> str:
     if node.node_name == "research":
-        return (
-            f"[node:research] 围绕任务「{ctx.title}」给出 3 条最关键的护理事实，"
-            f"每条不超过 20 字。"
-        )
+        return "[node:research] 围绕任务给出 3 条最关键的护理事实，每条 ≤ 20 字"
     if node.node_name == "writing":
-        bg = "\n".join(f"- {m['document']}" for m in input_mems) or "（无上游产出）"
-        return (
-            f"[node:writing] 任务：{ctx.title}\n\n"
-            f"## 调研结论\n{bg}\n\n"
-            f"请综合写一段 100 字内的护理建议。"
-        )
-    return f"[node:{node.node_name}] 完成你的子任务"
+        return "[node:writing] 基于上游产出，综合写一段 100 字内的护理建议"
+    return f"[node:{node.node_name}] 完成"
 
 
 async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
@@ -358,6 +356,11 @@ async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
     )
     print(f"[demo2] task={task_id} | nodes: research={n_research}  writing={n_writing}")
 
+    packer = ContextPacker(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+    )
     scheduler = Scheduler(
         state_store=state_store,
         transcript_store=transcript_store,
@@ -365,7 +368,8 @@ async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
         sandbox=sandbox,
         llm_client=client,
         recovery=recovery,
-        prompt_builder=_phase2_prompt_builder,
+        context_packer=packer,
+        sub_task_builder=_phase2_sub_task,
         heartbeat_interval=2.0,
     )
     final = await scheduler.run_task(task_id)
@@ -386,6 +390,265 @@ async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
     return 0 if final == "done" else 1
 
 
+# ============ 阶段 3 任务 3.6：id 取 vs 语义召回对比 ============
+
+
+_DRIFT_DOCS = [
+    # (doc, 是否「最终决策」) —— 都和"决策/结论/选型/A 工具"沾边，刁难召回
+    (
+        "选型决策：最终选 A 工具，理由是开源 + 本地部署，年成本 30 万落在 50 万预算内。",
+        True,
+    ),
+    ("评估结论：B 工具是商业版，本地部署，年成本 40 万，超出预算被否决。", False),
+    ("评估结论：C 工具是云端 SaaS，年成本 20 万，但不支持本地部署被否决。", False),
+    ("调研结论：可选方案为 A 工具、B 工具、C 工具三款。", False),
+    ("需求结论：硬约束是必须本地部署 + 年预算 ≤ 50 万 + 团队规模 100 人。", False),
+    ("中间结论：A 工具的开源协议是 Apache 2.0，可商用。", False),
+    ("阶段决策：先短列 3 款再做对比评估，最后选 1 款。", False),
+    ("过往决策：去年我们选过类似的 D 工具，但 6 个月后弃用了。", False),
+]
+
+_DRIFT_QUERIES = [
+    "最终选型决策",
+    "我们选了哪款",
+    "决策结论",
+    "工具选了什么",
+    "选型最终落到哪个",
+    "结论",
+    "我们的决策",
+]
+
+
+async def run_recall_drift(*, k: int = 3) -> int:
+    """对比 spec §3.3 「P0 级」判断：input_memory_ids 精确接力 vs 纯语义召回。"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    persist = DATA_DIR / "chroma_recall_drift"
+    if persist.exists():
+        import shutil
+
+        shutil.rmtree(persist)
+    memory_store = MemoryStore(persist)
+    user_id = "drift_test"
+    task_id = "task_drift"
+
+    correct_mid: str | None = None
+    for doc, is_correct in _DRIFT_DOCS:
+        mid = await memory_store.add(user_id, doc, {"task_id": task_id})
+        if is_correct:
+            correct_mid = mid
+    assert correct_mid is not None
+
+    print("=" * 70)
+    print("阶段 3 任务 3.6：input_memory_ids 精确取 vs 语义召回")
+    print("=" * 70)
+    print(f"样本：{len(_DRIFT_DOCS)} 条记忆（含 1 条「正确答案」），{len(_DRIFT_QUERIES)} 条 query")
+    print(f"\nA. 用 input_memory_ids = [{correct_mid}] 精确取：")
+    by_id = await memory_store.get_by_ids(user_id, [correct_mid])
+    print(f"   命中 1/1（100%）；原文：{by_id[0]['document']}")
+
+    print(f"\nB. 用 query 做语义召回（top-{k}）：")
+    top1_hits = 0
+    topk_hits = 0
+    misses: list[tuple[str, str]] = []
+    for q in _DRIFT_QUERIES:
+        hits = await memory_store.search(q, user_id, task_id, k=k)
+        ids = [h["id"] for h in hits]
+        if ids and ids[0] == correct_mid:
+            top1_hits += 1
+        if correct_mid in ids:
+            topk_hits += 1
+        else:
+            misses.append((q, hits[0]["document"] if hits else "(empty)"))
+
+    n = len(_DRIFT_QUERIES)
+    print(f"   top-1 命中率: {top1_hits}/{n} ({top1_hits/n:.0%})")
+    print(f"   top-{k} 命中率: {topk_hits}/{n} ({topk_hits/n:.0%})")
+    if misses:
+        print(f"   top-{k} 仍未命中（拿到错的）样例：")
+        for q, top in misses:
+            print(f"     - q={q!r}")
+            print(f"       top1={top}")
+
+    print("\n" + "=" * 70)
+    if top1_hits < n:
+        print(
+            "结论：语义召回 top-1 在 query 措辞上有飘移；按 input_memory_ids 精确取 100% 可靠。"
+        )
+        print("→ 验证 spec §3.3 P0 判断成立：精确接力 ≠ 召回，二者不可替代。")
+    else:
+        print(
+            "本批样本下 top-1 仍 100% 命中，但 query 一旦再「松」一些会立刻飘移。"
+        )
+    print("=" * 70)
+
+    import json
+
+    out_path = DATA_DIR / "recall_drift.json"
+    out_path.write_text(
+        json.dumps(
+            {
+                "samples": len(_DRIFT_DOCS),
+                "queries": _DRIFT_QUERIES,
+                "id_path_hit_rate": 1.0,
+                "search_top1_hit_rate": top1_hits / n,
+                "search_topk_hit_rate": topk_hits / n,
+                "k": k,
+                "misses": [{"q": q, "top1": top} for q, top in misses],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"\n结果已写入 {out_path}")
+    return 0
+
+
+# ============ 阶段 3 demo：双 Agent + 精确接力 ============
+
+_PHASE3_TASK_TITLE = (
+    "为「100 人研发团队 + 50 万年预算 + 必须本地部署」选型 AI 工作流工具"
+)
+
+# 模拟用户和早期 agent 聊过的几轮——任务在这之上接力
+_PHASE3_HISTORY = [
+    ("我想给团队选一款 AI 工作流工具", "好的，目标团队规模是多少？"),
+    ("100 人左右的研发团队", "预算和必须满足的硬性条件呢？"),
+    ("年预算 50 万以内，必须能本地部署", "明白，我可以帮你产出一份选型决策"),
+]
+
+_PHASE3_MOCK_OUTPUTS = {
+    "research": (
+        "调研结果——3 款候选：A 工具（开源、本地、年成本 30 万）；"
+        "B 工具（商业、本地、年成本 40 万）；C 工具（云端 SaaS、年成本 20 万）。"
+    ),
+    "writing": (
+        "决策：选 A 工具。理由——开源 + 本地部署同时满足两条硬约束；"
+        "年成本 30 万落在 50 万预算内；B 价格偏高，C 不支持本地部署故剔除。"
+    ),
+}
+
+
+def _phase3_sub_task(node, ctx) -> str:
+    if node.node_name == "research":
+        return (
+            "[node:research] 调研可选方案：列出 3 个候选 + 关键参数"
+            "（部署模式、年成本）"
+        )
+    if node.node_name == "writing":
+        return (
+            "[node:writing] 基于上游产出与接力点中的硬约束，"
+            "给出最终选型决策与理由"
+        )
+    return f"[node:{node.node_name}] 完成"
+
+
+async def run_demo_phase3(*, mock: bool, reset: bool) -> int:
+    if reset:
+        import shutil
+
+        for p in (TRANSCRIPT_DB, CHROMA_DIR, STATE_DB):
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    transcript_store = TranscriptStore(TRANSCRIPT_DB)
+    memory_store = MemoryStore(CHROMA_DIR)
+    state_store = StateStore(STATE_DB)
+    sandbox = LocalBackend()
+    recovery = Recovery(state_store, memory_store, stale_seconds=300)
+    packer = ContextPacker(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+    )
+
+    if mock:
+        client = _Phase2MockClient(chat_outputs=_PHASE3_MOCK_OUTPUTS)
+        print("[demo3] running with --mock")
+    else:
+        try:
+            client = default_client()
+        except RuntimeError as e:
+            print(f"[demo3] {e}", file=sys.stderr)
+            return 2
+        print("[demo3] running with real Claude API")
+
+    user_id = "default_user"
+
+    # 1. 写「历史对话」作为接力点原文
+    conv_id = "conv_phase3_history"
+    for i, (u, a) in enumerate(_PHASE3_HISTORY, start=1):
+        await transcript_store.add_turn(
+            conversation_id=conv_id,
+            turn_index=i,
+            user_input=u,
+            agent_output=a,
+            agent_id="planner",
+        )
+    print(f"[demo3] 历史对话已写入 {conv_id}（共 {len(_PHASE3_HISTORY)} 轮）")
+
+    # 2. 建 task + DAG，task 引用接力点
+    task_id = await state_store.create_task(
+        user_id=user_id,
+        title=_PHASE3_TASK_TITLE,
+        dag_id="phase3_serial",
+        handoff_conversation_id=conv_id,
+        handoff_turn_range=[1, len(_PHASE3_HISTORY)],
+    )
+    n_research = await state_store.create_dag_node(
+        task_id=task_id, node_name="research"
+    )
+    n_writing = await state_store.create_dag_node(
+        task_id=task_id, node_name="writing", depends_on=[n_research]
+    )
+    print(f"[demo3] task={task_id}")
+    print(f"[demo3] DAG: research={n_research} → writing={n_writing}")
+
+    # 3. 跑 scheduler
+    scheduler = Scheduler(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+        sandbox=sandbox,
+        llm_client=client,
+        recovery=recovery,
+        context_packer=packer,
+        sub_task_builder=_phase3_sub_task,
+        heartbeat_interval=2.0,
+    )
+    final = await scheduler.run_task(task_id)
+    print(f"\n[demo3] task 最终状态: {final}")
+
+    # 4. 重新拉一次 writing 节点的 packed context 验证接力 + 上游精确产出
+    packed = await packer.pack(
+        task_id=task_id,
+        node_id=n_writing,
+        sub_task_description=_phase3_sub_task(
+            await state_store.get_dag_node(n_writing),
+            type("Ctx", (), {"task_id": task_id, "title": _PHASE3_TASK_TITLE, "user_id": user_id})(),
+        ),
+    )
+    print(
+        "\n==== 阶段 3 验收：writing 节点收到的上下文 ===="
+    )
+    print(packed.text)
+    print(
+        f"\n==== 上游产出 present={packed.upstream_present} "
+        f"missing={packed.upstream_missing} | handoff={packed.handoff_present} ===="
+    )
+
+    # 5. 节点状态摘要
+    for n in await state_store.list_dag_nodes(task_id):
+        print(
+            f"  - {n.node_name}: status={n.status}  "
+            f"input_mids={n.input_memory_ids}  output_mid={n.output_memory_id}"
+        )
+    return 0 if final == "done" else 1
+
+
 # ============ CLI 入口 ============
 
 
@@ -397,20 +660,33 @@ def main() -> int:
     p_demo1.add_argument("--mock", action="store_true")
     p_demo1.add_argument("--reset", action="store_true")
 
-    p_demo2 = sub.add_parser("demo-phase2", help="阶段 2 串行 2 节点 DAG（spec §11）")
+    p_demo2 = sub.add_parser("demo-phase2", help="阶段 2 串行 2 节点 DAG")
     p_demo2.add_argument("--mock", action="store_true")
     p_demo2.add_argument("--reset", action="store_true")
 
+    p_demo3 = sub.add_parser("demo-phase3", help="阶段 3 双 Agent + 精确接力")
+    p_demo3.add_argument("--mock", action="store_true")
+    p_demo3.add_argument("--reset", action="store_true")
+
     p_recall = sub.add_parser("recall-baseline", help="阶段 1 任务 1.11 召回基线")
     p_recall.add_argument("-k", type=int, default=5)
+
+    p_drift = sub.add_parser(
+        "recall-drift", help="阶段 3 任务 3.6 对比实验：id 取 vs 语义召回飘移"
+    )
+    p_drift.add_argument("-k", type=int, default=3)
 
     args = parser.parse_args()
     if args.cmd == "demo-phase1":
         return asyncio.run(run_demo_phase1(mock=args.mock, reset=args.reset))
     if args.cmd == "demo-phase2":
         return asyncio.run(run_demo_phase2(mock=args.mock, reset=args.reset))
+    if args.cmd == "demo-phase3":
+        return asyncio.run(run_demo_phase3(mock=args.mock, reset=args.reset))
     if args.cmd == "recall-baseline":
         return asyncio.run(run_recall_baseline(k=args.k))
+    if args.cmd == "recall-drift":
+        return asyncio.run(run_recall_drift(k=args.k))
     return 1
 
 

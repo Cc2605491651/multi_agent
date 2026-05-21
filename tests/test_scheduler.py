@@ -1,4 +1,4 @@
-"""Scheduler 集成测（阶段 2 任务 2.8 验收 demo 的自动化版本）。"""
+"""Scheduler 集成测（阶段 2/3 验收 demo 的自动化版本）。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.context_packer import ContextPacker
 from orchestrator.recovery import Recovery
 from orchestrator.scheduler import Scheduler
 from storage.memory_store import MemoryStore
@@ -17,19 +18,29 @@ from worker.sandbox import LocalBackend
 
 @dataclass
 class _ScriptedClient:
-    """根据 user prompt 关键词返回 mock 输出。"""
+    """根据 user prompt 关键词返回 mock 输出；记录每次 chat 输入用于断言。"""
 
     chat_map: dict[str, str]
     calls: list[dict] = field(default_factory=list)
+    chat_inputs: list[str] = field(default_factory=list)
 
     async def complete(self, *, model: str, system: str, messages, max_tokens=1024):
-        self.calls.append({"model": model, "system": system})
         text = messages[-1]["content"]
+        self.calls.append({"model": model, "system": system, "text": text})
         if "提炼员" in system:
-            tag = "【用户输入】"
+            # mock distill：把「Agent 输出」当作记忆内容（真实 Haiku 会做摘要）
+            tag = "【Agent 输出】"
             if tag in text:
-                text = text.split(tag, 1)[1].split("【", 1)[0]
-            return text.strip()[:60]
+                tail = text.split(tag, 1)[1]
+                for stop in ("\n\n请按", "\n请按", "【"):
+                    if stop in tail:
+                        tail = tail.split(stop, 1)[0]
+                        break
+                text2 = tail
+            else:
+                text2 = text
+            return text2.strip()[:160]
+        self.chat_inputs.append(text)
         for key, out in self.chat_map.items():
             if key in text:
                 return out
@@ -43,20 +54,37 @@ def env(tmp_path: Path):
     memory = MemoryStore(tmp_path / "chroma")
     sandbox = LocalBackend(root_dir=tmp_path / "sb")
     recovery = Recovery(state, memory, stale_seconds=60)
-    return state, transcript, memory, sandbox, recovery
+    packer = ContextPacker(
+        state_store=state, transcript_store=transcript, memory_store=memory
+    )
+    return state, transcript, memory, sandbox, recovery, packer
 
 
-def _prompt(node, input_mems, ctx) -> str:
+def _sub_task(node, ctx) -> str:
     if node.node_name == "research":
-        return f"[research] 围绕 {ctx.title}：列出 3 条事实"
+        return f"[research] 围绕「{ctx.title}」列出 3 条事实"
     if node.node_name == "writing":
-        bg = "\n".join(m["document"] for m in input_mems) or "(无)"
-        return f"[writing] 根据上游：\n{bg}\n请写总结"
-    return f"[{node.node_name}]"
+        return f"[writing] 根据上游产出，围绕「{ctx.title}」写一段总结"
+    return f"[{node.node_name}] 完成你的子任务"
+
+
+def _build_scheduler(env, client) -> Scheduler:
+    state, transcript, memory, sandbox, recovery, packer = env
+    return Scheduler(
+        state_store=state,
+        transcript_store=transcript,
+        memory_store=memory,
+        sandbox=sandbox,
+        llm_client=client,
+        recovery=recovery,
+        context_packer=packer,
+        sub_task_builder=_sub_task,
+        heartbeat_interval=10.0,
+    )
 
 
 async def test_serial_two_node_dag_done(env) -> None:
-    state, transcript, memory, sandbox, recovery = env
+    state, *_ = env
     client = _ScriptedClient(
         chat_map={
             "[research]": "事实1；事实2；事实3",
@@ -71,21 +99,10 @@ async def test_serial_two_node_dag_done(env) -> None:
         task_id=tid, node_name="writing", depends_on=[n1]
     )
 
-    scheduler = Scheduler(
-        state_store=state,
-        transcript_store=transcript,
-        memory_store=memory,
-        sandbox=sandbox,
-        llm_client=client,
-        recovery=recovery,
-        prompt_builder=_prompt,
-        heartbeat_interval=10.0,
-    )
+    scheduler = _build_scheduler(env, client)
     final = await scheduler.run_task(tid)
     assert final == "done"
-
-    task = await state.get_task(tid)
-    assert task.status == "done"
+    assert (await state.get_task(tid)).status == "done"
 
     nodes = await state.list_dag_nodes(tid)
     by_name = {n.node_name: n for n in nodes}
@@ -96,12 +113,10 @@ async def test_serial_two_node_dag_done(env) -> None:
 
 
 async def test_downstream_receives_input_memory_ids(env) -> None:
-    state, transcript, memory, sandbox, recovery = env
+    """spec §3.3：调度某节点前把上游 done 节点的 output_memory_id 填进 input_memory_ids。"""
+    state, *_ = env
     client = _ScriptedClient(
-        chat_map={
-            "[research]": "重要事实 A、B、C",
-            "[writing]": "综合：A、B、C 已收到",
-        }
+        chat_map={"[research]": "重要事实 A、B、C", "[writing]": "综合 A、B、C"}
     )
     tid = await state.create_task(
         user_id="default_user", title="t", dag_id="d"
@@ -111,39 +126,49 @@ async def test_downstream_receives_input_memory_ids(env) -> None:
         task_id=tid, node_name="writing", depends_on=[n1]
     )
 
-    scheduler = Scheduler(
-        state_store=state,
-        transcript_store=transcript,
-        memory_store=memory,
-        sandbox=sandbox,
-        llm_client=client,
-        recovery=recovery,
-        prompt_builder=_prompt,
-        heartbeat_interval=10.0,
-    )
-    await scheduler.run_task(tid)
+    await _build_scheduler(env, client).run_task(tid)
 
     n1_row = await state.get_dag_node(n1)
     n2_row = await state.get_dag_node(n2)
-    # spec §3.3：调度某节点前把上游 done 的 output_memory_id 填进 input_memory_ids
     assert n2_row.input_memory_ids == [n1_row.output_memory_id]
-    # 上游产出 + 下游写作 都已 active
-    upstream_status = await memory.get_status(
-        "default_user", n1_row.output_memory_id
+
+    state, _, memory, *_ = env
+    assert await memory.get_status("default_user", n1_row.output_memory_id) == "active"
+    assert await memory.get_status("default_user", n2_row.output_memory_id) == "active"
+
+
+async def test_downstream_context_contains_upstream_raw_output(env) -> None:
+    """spec §11 阶段 3 验收：写作 Agent 收到的 context 里**直接出现**上游产出原文。"""
+    state, *_ = env
+    upstream_doc = "方案 X：因为 Y，所以选 X"
+    client = _ScriptedClient(
+        chat_map={
+            "[research]": upstream_doc,
+            "[writing]": "已综合方案 X 的理由 Y",
+        }
     )
-    downstream_status = await memory.get_status(
-        "default_user", n2_row.output_memory_id
+    tid = await state.create_task(
+        user_id="default_user", title="选型决策", dag_id="d"
     )
-    assert upstream_status == "active"
-    assert downstream_status == "active"
+    n1 = await state.create_dag_node(task_id=tid, node_name="research")
+    n2 = await state.create_dag_node(
+        task_id=tid, node_name="writing", depends_on=[n1]
+    )
+
+    await _build_scheduler(env, client).run_task(tid)
+    # research 产出（mock distill 是截短）已被写入 memory，且 writing 的 chat 输入应含该原文
+    research_chat = client.chat_inputs[0]
+    writing_chat = client.chat_inputs[1]
+    assert "[research]" in research_chat
+    assert "[writing]" in writing_chat
+    # 关键断言：写作节点的 user 输入里直接出现 research 的原文 mid 取值
+    assert "方案 X" in writing_chat
+    assert "因为 Y" in writing_chat
 
 
 async def test_recovery_runs_before_task(env) -> None:
-    """启动前 recovery sweep：故意留一个 stale running 节点，看是否被回收。"""
-    state, transcript, memory, sandbox, recovery = env
-    client = _ScriptedClient(
-        chat_map={"[research]": "OK", "[writing]": "OK"}
-    )
+    state, *_ = env
+    client = _ScriptedClient(chat_map={"[research]": "OK", "[writing]": "OK"})
     tid = await state.create_task(
         user_id="default_user", title="t", dag_id="d"
     )
@@ -152,7 +177,6 @@ async def test_recovery_runs_before_task(env) -> None:
         task_id=tid, node_name="writing", depends_on=[n1]
     )
 
-    # 模拟 research 之前被 kill：状态 running + 心跳老化
     await state.claim_node_running(n1, "ghost_worker")
     import sqlite3
 
@@ -162,45 +186,22 @@ async def test_recovery_runs_before_task(env) -> None:
             (n1,),
         )
 
-    scheduler = Scheduler(
-        state_store=state,
-        transcript_store=transcript,
-        memory_store=memory,
-        sandbox=sandbox,
-        llm_client=client,
-        recovery=recovery,
-        prompt_builder=_prompt,
-        heartbeat_interval=10.0,
-    )
-    final = await scheduler.run_task(tid)
+    final = await _build_scheduler(env, client).run_task(tid)
     assert final == "done"
-
     n1_row = await state.get_dag_node(n1)
     assert n1_row.status == "done"
-    assert n1_row.retry_count == 1  # 因为 recovery 重置时计数 +1
+    assert n1_row.retry_count == 1
 
 
 async def test_task_marked_failed_when_node_fails(env) -> None:
-    state, transcript, memory, sandbox, recovery = env
+    state, *_ = env
 
     @dataclass
     class _Boom:
         async def complete(self, *, model, system, messages, max_tokens=1024):
             raise RuntimeError("simulated LLM crash")
 
-    tid = await state.create_task(
-        user_id="default_user", title="t", dag_id="d"
-    )
+    tid = await state.create_task(user_id="default_user", title="t", dag_id="d")
     await state.create_dag_node(task_id=tid, node_name="x")
-    scheduler = Scheduler(
-        state_store=state,
-        transcript_store=transcript,
-        memory_store=memory,
-        sandbox=sandbox,
-        llm_client=_Boom(),
-        recovery=recovery,
-        prompt_builder=_prompt,
-        heartbeat_interval=10.0,
-    )
-    final = await scheduler.run_task(tid)
+    final = await _build_scheduler(env, _Boom()).run_task(tid)
     assert final == "failed"

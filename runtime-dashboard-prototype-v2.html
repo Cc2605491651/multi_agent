@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多 Agent 协作运行时仪表盘 · 原型 v2</title>
+<style>
+  :root{
+    --bg:#faf9f5; --surface:#ffffff; --surface2:#f1efe8;
+    --text:#2c2c2a; --text2:#5f5e5a; --border:#d3d1c7;
+    --wait-bg:#f1efe8; --wait-stroke:#d3d1c7; --wait-text:#888780;
+    --running-bg:#FAEEDA; --running-stroke:#BA7517; --running-text:#854F0B;
+    --done-bg:#EAF3DE; --done-stroke:#639922; --done-text:#3B6D11;
+    --failed-bg:#FCEBEB; --failed-stroke:#E24B4A; --failed-text:#A32D2D;
+    --skipped-bg:#f1efe8; --skipped-stroke:#b4b2a9; --skipped-text:#888780;
+    --worker:#1D9E75; --flow:#1D9E75;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1f1e1c; --surface:#262624; --surface2:#2f2e2b;
+      --text:#e8e6dc; --text2:#a8a69c; --border:#444441;
+      --wait-bg:#2f2e2b; --wait-stroke:#444441; --wait-text:#888780;
+      --running-bg:#412402; --running-stroke:#EF9F27; --running-text:#FAC775;
+      --done-bg:#173404; --done-stroke:#97C459; --done-text:#C0DD97;
+      --failed-bg:#501313; --failed-stroke:#F09595; --failed-text:#F7C1C1;
+      --skipped-bg:#2f2e2b; --skipped-stroke:#5f5e5a; --skipped-text:#888780;
+    }
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--text);padding:32px 20px;line-height:1.6}
+  .wrap{max-width:780px;margin:0 auto}
+  h1{font-size:20px;font-weight:600;margin-bottom:6px}
+  .sub{font-size:13px;color:var(--text2);margin-bottom:24px}
+  .bar{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  .btn{padding:8px 16px;border:0.5px solid var(--border);background:var(--surface);
+    border-radius:8px;cursor:pointer;font-size:14px;color:var(--text);transition:background .15s,transform .1s}
+  .btn:hover{background:var(--surface2)}
+  .btn:active{transform:scale(0.98)}
+  .btn:disabled{opacity:0.5;cursor:not-allowed}
+  .stat{display:flex;gap:10px;flex-wrap:wrap}
+  .pill{background:var(--surface2);border-radius:8px;padding:6px 12px;font-size:13px;color:var(--text2)}
+  .pill b{color:var(--text);font-weight:600}
+  .canvas{background:var(--surface);border:0.5px solid var(--border);border-radius:12px;padding:8px}
+  .node rect{transition:fill .35s,stroke .35s}
+  .node text{transition:fill .35s}
+  .node .statelabel{font-size:10px}
+  .worker{transition:opacity .45s,transform .45s}
+  .edge{transition:stroke .35s,stroke-width .35s}
+
+  /* 数据流动画 */
+  .flow{stroke-dasharray:5 5;animation:flow 1s linear infinite}
+  @keyframes flow{to{stroke-dashoffset:-20}}
+
+  /* 运行中：节点边框呼吸闪烁 */
+  .node.running rect{animation:breathe 1.3s ease-in-out infinite}
+  @keyframes breathe{
+    0%,100%{stroke-width:1; stroke-opacity:1}
+    50%{stroke-width:2.6; stroke-opacity:0.55}
+  }
+  /* 运行中：Worker 圆点脉冲 */
+  .worker.active .pulse{animation:pulse 1.3s ease-out infinite}
+  @keyframes pulse{
+    0%{r:9; opacity:0.55}
+    70%{r:18; opacity:0}
+    100%{r:18; opacity:0}
+  }
+  /* 失败节点：短促抖一下，提示注意 */
+  .node.failed rect{animation:shake .4s ease-in-out}
+  @keyframes shake{
+    0%,100%{transform:translateX(0)}
+    25%{transform:translateX(-3px)}
+    75%{transform:translateX(3px)}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .flow,.node.running rect,.worker.active .pulse,.node.failed rect{animation:none}
+  }
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;font-size:12px;color:var(--text2)}
+  .dot{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  .log{margin-top:16px;background:var(--surface2);border-radius:8px;padding:12px 14px;
+    font-family:ui-monospace,"SF Mono",Consolas,monospace;font-size:12px;color:var(--text2);
+    min-height:110px;line-height:1.85}
+  .log .err{color:var(--failed-text)}
+  .log .ok{color:var(--done-text)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>多 Agent 协作运行时仪表盘 · 原型 v2</h1>
+  <p class="sub">点击「开始运行」观察调度过程。本演示中「写作整理 B」会先失败再重试成功，用于展示失败/重试态。当前为模拟数据；接入真实状态库的方法见文件末尾注释。</p>
+
+  <div class="bar">
+    <button class="btn" id="run">▶ 开始运行</button>
+    <button class="btn" id="reset">↻ 重置</button>
+    <div class="stat">
+      <span class="pill">运行中 Worker <b id="running">0</b></span>
+      <span class="pill">已完成 <b id="done">0</b> / 6</span>
+      <span class="pill">失败重试 <b id="retries">0</b></span>
+    </div>
+  </div>
+
+  <div class="canvas">
+    <svg width="100%" viewBox="0 0 700 360" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </marker>
+      </defs>
+
+      <line class="edge" id="e-01" x1="158" y1="84" x2="254" y2="84" stroke="var(--border)" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line class="edge" id="e-02" x1="158" y1="188" x2="254" y2="188" stroke="var(--border)" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <line class="edge" id="e-03" x1="158" y1="292" x2="254" y2="292" stroke="var(--border)" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <path class="edge" id="e-14" d="M414 84 L452 84 L452 138 L490 138" fill="none" stroke="var(--border)" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <path class="edge" id="e-24" d="M414 188 L450 188 L450 150 L490 150" fill="none" stroke="var(--border)" stroke-width="1.5" marker-end="url(#arrow)"/>
+      <path class="edge" id="e-34" d="M414 292 L452 292 L452 162 L490 162" fill="none" stroke="var(--border)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+      <g class="node" id="n-0" data-name="调研 A">
+        <rect x="44" y="56" width="114" height="56" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="101" y="78" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">调研 A</text>
+        <text class="statelabel" x="101" y="95" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+      <g class="node" id="n-1" data-name="调研 B">
+        <rect x="44" y="160" width="114" height="56" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="101" y="182" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">调研 B</text>
+        <text class="statelabel" x="101" y="199" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+      <g class="node" id="n-2" data-name="调研 C">
+        <rect x="44" y="264" width="114" height="56" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="101" y="286" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">调研 C</text>
+        <text class="statelabel" x="101" y="303" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+      <g class="node" id="n-3" data-name="写作整理 A">
+        <rect x="258" y="56" width="156" height="56" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="336" y="78" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">写作整理 A</text>
+        <text class="statelabel" x="336" y="95" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+      <g class="node" id="n-4" data-name="写作整理 B">
+        <rect x="258" y="160" width="156" height="56" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="336" y="182" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">写作整理 B</text>
+        <text class="statelabel" x="336" y="199" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+      <g class="node" id="n-5" data-name="汇总报告">
+        <rect x="258" y="264" width="156" height="56" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="336" y="286" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">汇总报告</text>
+        <text class="statelabel" x="336" y="303" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+      <g class="node" id="n-final" data-name="研究报告输出">
+        <rect x="494" y="114" width="160" height="72" rx="8" fill="var(--wait-bg)" stroke="var(--wait-stroke)" stroke-width="1"/>
+        <text class="nodename" x="574" y="142" text-anchor="middle" dominant-baseline="central" font-size="14" fill="var(--wait-text)">研究报告输出</text>
+        <text class="statelabel" x="574" y="160" text-anchor="middle" dominant-baseline="central" fill="var(--wait-text)">等待中</text>
+      </g>
+
+      <g class="worker" id="w-0" style="opacity:0">
+        <circle class="pulse" cx="101" cy="130" r="9" fill="var(--worker)"/>
+        <circle cx="101" cy="130" r="6" fill="var(--worker)"/>
+        <text x="115" y="130" dominant-baseline="central" font-size="10" fill="var(--text2)">执行中</text>
+      </g>
+      <g class="worker" id="w-1" style="opacity:0">
+        <circle class="pulse" cx="101" cy="234" r="9" fill="var(--worker)"/>
+        <circle cx="101" cy="234" r="6" fill="var(--worker)"/>
+        <text x="115" y="234" dominant-baseline="central" font-size="10" fill="var(--text2)">执行中</text>
+      </g>
+      <g class="worker" id="w-2" style="opacity:0">
+        <circle class="pulse" cx="101" cy="338" r="9" fill="var(--worker)"/>
+        <circle cx="101" cy="338" r="6" fill="var(--worker)"/>
+        <text x="115" y="338" dominant-baseline="central" font-size="10" fill="var(--text2)">执行中</text>
+      </g>
+      <g class="worker" id="w-3" style="opacity:0">
+        <circle class="pulse" cx="336" cy="130" r="9" fill="var(--worker)"/>
+        <circle cx="336" cy="130" r="6" fill="var(--worker)"/>
+        <text x="350" y="130" dominant-baseline="central" font-size="10" fill="var(--text2)">执行中</text>
+      </g>
+      <g class="worker" id="w-4" style="opacity:0">
+        <circle class="pulse" cx="336" cy="234" r="9" fill="var(--worker)"/>
+        <circle cx="336" cy="234" r="6" fill="var(--worker)"/>
+        <text x="350" y="234" dominant-baseline="central" font-size="10" fill="var(--text2)">执行中</text>
+      </g>
+      <g class="worker" id="w-5" style="opacity:0">
+        <circle class="pulse" cx="336" cy="338" r="9" fill="var(--worker)"/>
+        <circle cx="336" cy="338" r="6" fill="var(--worker)"/>
+        <text x="350" y="338" dominant-baseline="central" font-size="10" fill="var(--text2)">执行中</text>
+      </g>
+    </svg>
+
+    <div class="legend">
+      <span><span class="dot" style="background:var(--wait-bg);border:0.5px solid var(--wait-stroke)"></span>等待中</span>
+      <span><span class="dot" style="background:var(--running-bg);border:0.5px solid var(--running-stroke)"></span>运行中（边框闪烁）</span>
+      <span><span class="dot" style="background:var(--done-bg);border:0.5px solid var(--done-stroke)"></span>已完成</span>
+      <span><span class="dot" style="background:var(--failed-bg);border:0.5px solid var(--failed-stroke)"></span>失败</span>
+      <span><span class="dot" style="background:var(--skipped-bg);border:0.5px solid var(--skipped-stroke)"></span>已跳过</span>
+      <span><span class="dot" style="background:var(--worker);border-radius:50%"></span>临时 Worker</span>
+    </div>
+  </div>
+
+  <div class="log" id="log">点击「开始运行」开始。</div>
+</div>
+
+<script>
+(function(){
+  // ===== DAG 定义：节点 + 依赖 + 失败演示标记 =====
+  // failAttempts: 该节点会连续失败几次后才成功（演示重试）；0 = 永不失败
+  var nodes = [
+    {id:0, name:"调研 A",     deps:[],      delay:900,  failAttempts:0},
+    {id:1, name:"调研 B",     deps:[],      delay:900,  failAttempts:0},
+    {id:2, name:"调研 C",     deps:[],      delay:900,  failAttempts:0},
+    {id:3, name:"写作整理 A", deps:[0],     delay:1000, failAttempts:0},
+    {id:4, name:"写作整理 B", deps:[1],     delay:1000, failAttempts:1},  // 失败 1 次再成功
+    {id:5, name:"汇总报告",   deps:[2,3,4], delay:1100, failAttempts:0}
+  ];
+  var edges = {0:["e-01"], 1:["e-02"], 2:["e-03"], 3:["e-14"], 4:["e-24"], 5:["e-34"]};
+  var STATE_LABEL = {wait:"等待中", running:"运行中", done:"已完成", failed:"失败", retrying:"重试中", skipped:"已跳过"};
+
+  var state={}, attempts={}, timers=[], doneCount=0, runningCount=0, retryCount=0;
+  var logEl=document.getElementById('log');
+  var runBtn=document.getElementById('run');
+  var runEl=document.getElementById('running');
+  var doneEl=document.getElementById('done');
+  var retryEl=document.getElementById('retries');
+
+  function log(msg, kind){
+    var t=new Date().toLocaleTimeString('zh-CN',{hour12:false});
+    var cls = kind==='err'?' class="err"':kind==='ok'?' class="ok"':'';
+    var line='<span'+cls+'>['+t+'] '+msg+'</span>';
+    var prev=logEl.innerHTML.split('<br>').slice(0,5).join('<br>');
+    logEl.innerHTML=line+'<br>'+prev;
+  }
+  function setNode(id,st){
+    var g=document.getElementById('n-'+id);
+    var rect=g.querySelector('rect');
+    var nm=g.querySelector('.nodename');
+    var sl=g.querySelector('.statelabel');
+    g.classList.remove('running','failed');
+    var map={
+      wait:    ['--wait-bg','--wait-stroke','--wait-text'],
+      running: ['--running-bg','--running-stroke','--running-text'],
+      retrying:['--running-bg','--running-stroke','--running-text'],
+      done:    ['--done-bg','--done-stroke','--done-text'],
+      failed:  ['--failed-bg','--failed-stroke','--failed-text'],
+      skipped: ['--skipped-bg','--skipped-stroke','--skipped-text']
+    };
+    var c=map[st];
+    rect.setAttribute('fill','var('+c[0]+')');
+    rect.setAttribute('stroke','var('+c[1]+')');
+    nm.setAttribute('fill','var('+c[2]+')');
+    sl.setAttribute('fill','var('+c[2]+')');
+    sl.textContent=STATE_LABEL[st];
+    if(st==='running'||st==='retrying') g.classList.add('running');
+    if(st==='failed') g.classList.add('failed');
+  }
+  function setEdge(id,active){
+    var e=document.getElementById(id);
+    if(!e)return;
+    if(active){ e.setAttribute('stroke','var(--flow)'); e.setAttribute('stroke-width','2.5'); e.classList.add('flow'); }
+    else{ e.setAttribute('stroke','var(--border)'); e.setAttribute('stroke-width','1.5'); e.classList.remove('flow'); }
+  }
+  function worker(id,on){
+    var w=document.getElementById('w-'+id);
+    w.style.opacity=on?'1':'0';
+    w.style.transform=on?'translateY(0)':'translateY(-6px)';
+    w.classList.toggle('active',on);
+  }
+  function depsDone(n){
+    // 依赖完成或跳过都算「就绪」
+    return n.deps.every(function(d){return state[d]==='done'||state[d]==='skipped';});
+  }
+
+  function tryStart(n){
+    if(state[n.id] && state[n.id]!=='wait') return;
+    if(!depsDone(n)) return;
+    if(attempts[n.id]===undefined) attempts[n.id]=0;
+    runNode(n);
+  }
+  function runNode(n){
+    attempts[n.id]++;
+    var isRetry = attempts[n.id]>1;
+    state[n.id]= isRetry?'retrying':'running';
+    setNode(n.id, state[n.id]);
+    worker(n.id,true);
+    runningCount++; runEl.textContent=runningCount;
+    (edges[n.id]||[]).forEach(function(e){setEdge(e,true);});
+    log((isRetry?'第'+attempts[n.id]+'次尝试 — ':'')+'调度器拉起 Worker → 节点「'+n.name+'」开始执行');
+
+    var tm=setTimeout(function(){
+      worker(n.id,false);
+      runningCount--; runEl.textContent=runningCount;
+      (edges[n.id]||[]).forEach(function(e){setEdge(e,false);});
+
+      var willFail = attempts[n.id] <= n.failAttempts;
+      if(willFail){
+        state[n.id]='failed';
+        setNode(n.id,'failed');
+        log('节点「'+n.name+'」执行失败（Worker 异常）','err');
+        retryCount++; retryEl.textContent=retryCount;
+        // 失败 → 销毁旧 Worker，换全新 Worker 重试
+        var rtm=setTimeout(function(){
+          log('清理半成品记忆，换新 Worker 重试节点「'+n.name+'」');
+          runNode(n);
+        },1100);
+        timers.push(rtm);
+        return;
+      }
+
+      state[n.id]='done';
+      setNode(n.id,'done');
+      doneCount++; doneEl.textContent=doneCount;
+      log('节点「'+n.name+'」完成，回写记忆库 → 销毁 Worker','ok');
+
+      if(doneCount===6){
+        setNode('final','done');
+        log('全部节点完成，研究报告输出。','ok');
+        runBtn.disabled=false;
+      }
+      nodes.forEach(tryStart);
+    }, n.delay + Math.random()*700);
+    timers.push(tm);
+  }
+
+  function reset(){
+    timers.forEach(clearTimeout); timers=[];
+    state={}; attempts={}; doneCount=0; runningCount=0; retryCount=0;
+    runEl.textContent='0'; doneEl.textContent='0'; retryEl.textContent='0';
+    nodes.forEach(function(n){ setNode(n.id,'wait'); worker(n.id,false); });
+    setNode('final','wait');
+    Object.keys(edges).forEach(function(k){ edges[k].forEach(function(e){setEdge(e,false);}); });
+    logEl.innerHTML='已重置。点击「开始运行」重新观察。';
+    runBtn.disabled=false;
+  }
+  runBtn.addEventListener('click',function(){
+    reset();
+    runBtn.disabled=true;
+    logEl.innerHTML='调度器读取 DAG，开始调度…';
+    var stm=setTimeout(function(){ nodes.forEach(tryStart); },400);
+    timers.push(stm);
+  });
+  document.getElementById('reset').addEventListener('click',reset);
+})();
+</script>
+
+<!--
+==================================================================
+  如何把这个原型接入真实系统（开发到阶段 5 再做）
+==================================================================
+
+  现状：动画是 setTimeout 模拟的假数据。
+  真实仪表盘的唯一区别 —— 状态来自状态库，不是定时器。
+
+  架构（仪表盘是"旁观者"，与系统完全解耦）：
+
+    状态库 (SQLite)  ←── 编排器跑任务时不断写入 dag_nodes.status
+         │
+         │  前端每 1~2 秒轮询
+         ▼
+    本仪表盘  ←── 读到最新状态，重绘节点颜色 / Worker 显隐
+
+  改造步骤：
+
+  1) 编排器端用 FastAPI 加一个只读接口。
+     注意：必须走 state_store 模块，不要直连 sqlite3 —— 见架构文档 v3/v4 §10.2。
+
+       from fastapi import FastAPI
+       from storage.state_store import StateStore
+       app = FastAPI()
+       store = StateStore()
+
+       @app.get("/api/dag-status")
+       def dag_status(task_id: str):
+           nodes = store.list_dag_nodes(task_id)
+           return [
+               {"id": n.id, "name": n.node_name, "status": n.status,
+                "retry_count": n.retry_count}
+               for n in nodes
+           ]
+
+  2) 本文件里删掉 setTimeout 那套模拟逻辑，换成轮询：
+
+       async function poll(){
+         const res  = await fetch('http://localhost:8000/api/dag-status?task_id=xxx');
+         const data = await res.json();
+         data.forEach(n => setNode(n.id, n.status));
+         //  status 直接对应 setNode 支持的 6 种态：
+         //  wait / running / done / failed / retrying / skipped
+       }
+       setInterval(poll, 2000);
+
+  3) 节点多了之后，手写 SVG 坐标会很累 —— 换成 Cytoscape.js 自动布局。
+       https://cdn.jsdelivr.net/npm/cytoscape@3/dist/cytoscape.min.js
+
+  本原型的 setNode() 已支持 6 种状态、失败红色、运行中闪烁，
+  与架构文档 §5 失败模型的 status 取值（done/failed/skipped 等）一一对应，
+  接真实数据时状态映射可直接复用。
+==================================================================
+-->
+</body>
+</html>

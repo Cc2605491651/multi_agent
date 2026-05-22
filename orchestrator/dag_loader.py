@@ -28,7 +28,9 @@ from storage.state_store import (
     VALID_FAILURE_POLICY,
     VALID_MEMORY_LEVEL,
 )
-from worker.harness import AgentHarness
+from dataclasses import replace as _dc_replace
+
+from worker.harness import AgentHarness, HandoffSpec
 
 
 @dataclass(frozen=True)
@@ -230,6 +232,24 @@ async def instantiate_dag(
     mapping: dict[str, str] = {}
     for n in sorted_nodes:
         depends_on = [mapping[d] for d in n.deps]
+
+        # v6：把 harness.handoff.from_node 从逻辑 id 翻译为真实 node_id
+        final_harness = n.harness
+        if final_harness.handoff is not None:
+            ho = final_harness.handoff
+            if ho.from_node not in mapping:
+                raise ValueError(
+                    f"node {n.id}: harness.handoff.from_node={ho.from_node!r} "
+                    f"is not a defined node in this DAG (or not topologically before)"
+                )
+            final_harness = _dc_replace(
+                final_harness,
+                handoff=HandoffSpec(
+                    from_node=mapping[ho.from_node],
+                    turn_range=list(ho.turn_range) if ho.turn_range else None,
+                ),
+            )
+
         nid = await state_store.create_dag_node(
             task_id=task_id,
             node_name=n.name,
@@ -239,7 +259,7 @@ async def instantiate_dag(
             memory_level=n.memory_level,
             model_name=n.model_name,
             tools=n.tools,
-            harness=n.harness,
+            harness=final_harness,
         )
         mapping[n.id] = nid
     return task_id, mapping

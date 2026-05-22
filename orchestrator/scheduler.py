@@ -332,6 +332,7 @@ class Scheduler:
             async with HeartbeatTask(
                 self._state_store, node.id, interval=self._heartbeat_interval
             ):
+                loop_res = None
                 if registry and registry.names() and self._can_use_tools(agent):
                     loop_res = await agent.run_with_tools(
                         packed.text,
@@ -355,6 +356,7 @@ class Scheduler:
                     turn_index=1,
                     user_input=packed.text,
                     agent_output=agent_output,
+                    loop_result=loop_res,
                 )
                 if not result.committed:
                     return NodeRunOutcome(

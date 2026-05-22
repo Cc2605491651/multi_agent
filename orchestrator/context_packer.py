@@ -31,6 +31,7 @@ import tiktoken
 from storage.memory_store import MemoryStore
 from storage.state_store import DagNodeRow, StateStore, TaskRow
 from storage.transcript_store import TranscriptStore
+from worker.harness import AgentHarness
 
 _log = logging.getLogger(__name__)
 
@@ -75,6 +76,8 @@ class PackedContext:
     semantic_dropped_for_budget: int
     query_used: str
     token_count: int
+    node_handoff_present: bool = False
+    node_handoff_turn_count: int = 0
 
 
 class ContextPacker:
@@ -110,6 +113,9 @@ class ContextPacker:
             raise ValueError(f"node not found: {node_id}")
 
         handoff_text = await self._format_handoff(task)
+        node_handoff_text, node_handoff_count = await self._format_node_handoff(
+            task, node
+        )
         upstream_text, present, missing, upstream_mems = await self._format_upstream(
             task, node
         )
@@ -122,6 +128,7 @@ class ContextPacker:
         text, kept, dropped = self._apply_budget(
             title=task.title,
             handoff=handoff_text,
+            node_handoff=node_handoff_text,
             upstream=upstream_text,
             sub_task=sub_task_description,
             semantic=semantic_results,
@@ -136,7 +143,92 @@ class ContextPacker:
             semantic_dropped_for_budget=dropped,
             query_used=query,
             token_count=count_tokens(text),
+            node_handoff_present=node_handoff_text is not None,
+            node_handoff_turn_count=node_handoff_count,
         )
+
+    # ---- 节点级接力（v6 §9.8）----
+
+    async def _format_node_handoff(
+        self, task: TaskRow, node: DagNodeRow
+    ) -> tuple[str | None, int]:
+        """spec v6 §9.8：B 节点 harness.handoff 声明从某上游节点 conv 抓多轮原文。
+
+        - ``from_node`` 在 ``instantiate_dag`` 阶段已翻译为真实 node_id
+        - 上游节点 conv_id 约定为 ``conv_{task_id}_{from_node_id}``（scheduler 协议）
+        - ``turn_range`` 缺省时取该 conv 全部 turn
+        """
+        if not node.harness_json:
+            return None, 0
+        try:
+            harness = AgentHarness.from_dict(node.harness_json)
+        except (TypeError, ValueError) as e:
+            _log.warning("invalid harness_json on node %s: %s", node.id, e)
+            return None, 0
+        if harness.handoff is None:
+            return None, 0
+
+        from_node_id = harness.handoff.from_node
+        conv_id = f"conv_{task.id}_{from_node_id}"
+
+        # turn_range：缺省全取
+        if harness.handoff.turn_range:
+            start, end = int(harness.handoff.turn_range[0]), int(
+                harness.handoff.turn_range[1]
+            )
+        else:
+            n = await self._transcript.count_turns(conv_id)
+            if n == 0:
+                return (
+                    f"（节点接力 from={from_node_id} 的 conv 为空）",
+                    0,
+                )
+            start, end = 1, n
+
+        turns = await self._transcript.get_turns_by_range(conv_id, start, end)
+        if not turns:
+            return (
+                f"（节点接力 from={from_node_id} turns=[{start},{end}] 未找到对话）",
+                0,
+            )
+
+        lines: list[str] = []
+        upstream_node = next(
+            (n for n in await self._state.list_dag_nodes(task.id) if n.id == from_node_id),
+            None,
+        )
+        upstream_label = (
+            f"{from_node_id} ({upstream_node.node_name})"
+            if upstream_node else from_node_id
+        )
+        lines.append(f"上游节点：{upstream_label}；turn {start}-{end}")
+        for t in turns:
+            kind = t.turn_kind
+            if kind == "user" or kind == "single":
+                if t.user_input:
+                    lines.append(f"## turn {t.turn_index} · {kind}")
+                    lines.append(f"用户输入：{t.user_input[:1200]}")
+                if t.agent_output:
+                    lines.append(f"Agent 输出：{t.agent_output[:1200]}")
+            elif kind == "assistant" or kind == "final":
+                lines.append(f"## turn {t.turn_index} · {kind}")
+                lines.append(t.agent_output[:1200])
+            elif kind == "tool_call":
+                meta = t.turn_meta or {}
+                lines.append(
+                    f"## turn {t.turn_index} · 工具调用 [{meta.get('tool_name', '?')}]"
+                )
+                args = meta.get("args", {})
+                if args:
+                    import json as _json
+
+                    lines.append("args: " + _json.dumps(args, ensure_ascii=False)[:600])
+            elif kind == "tool_result":
+                meta = t.turn_meta or {}
+                err = "（错误）" if meta.get("is_error") else ""
+                lines.append(f"## turn {t.turn_index} · 工具结果{err}")
+                lines.append(t.agent_output[:1200])
+        return ("\n".join(lines), len(turns))
 
     # ---- handoff ----
 
@@ -290,6 +382,7 @@ class ContextPacker:
         *,
         title: str,
         handoff: str | None,
+        node_handoff: str | None,
         upstream: str,
         sub_task: str,
         semantic: Iterable[dict],
@@ -300,6 +393,8 @@ class ContextPacker:
             parts = [f"# 任务主题\n\n{title}"]
             if handoff_part:
                 parts.append(f"# 接力点（原文）\n\n{handoff_part}")
+            if node_handoff:
+                parts.append(f"# 上游节点接力（多轮原文）\n\n{node_handoff}")
             parts.append(f"# 上游产出\n\n{upstream}")
             sem_body = "\n".join(kept_semantic) if kept_semantic else "（暂无）"
             parts.append(f"# 语义补充记忆\n\n{sem_body}")

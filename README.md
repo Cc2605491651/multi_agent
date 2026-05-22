@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-主线 plan §1-§5 + ABC 完整 Harness 体系 + **Planner Agent**（自然语言 → DAG）全部交付，**252 测试全过（~22s）**。
+主线 plan §1-§5 + ABC 完整 Harness 体系 + **Planner Agent**（自然语言 → DAG）+ **v6 真协作**（多轮 transcript + 节点级接力）全部交付，**268 测试全过（~25s）**。
 
 - **阶段 1（单 Agent + 记忆库）**：✅
   - `storage/transcript_store.py` SQLite 对话原文（async / `asyncio.to_thread`）
@@ -108,7 +108,8 @@ pytest -v
 
 ## 文档
 
-- **`multi-agent-architecture-spec-v5.md`** — 当前架构实施手册（推荐先读）
+- **`multi-agent-architecture-spec-v6.md`** — 当前架构实施手册（推荐先读，含 v6 真协作）
+- `multi-agent-architecture-spec-v5.md` — ABC 段实施手册（v6 之前的最后稳定版）
 - `multi-agent-architecture-spec-v4.md` — 初心档案（不再更新）
 - `project-development-plan-v1.md` — 6 阶段开发计划
 - `runtime-dashboard-prototype-v2.html` — 阶段 5 之前的原型（已被真实 dashboard 替代）

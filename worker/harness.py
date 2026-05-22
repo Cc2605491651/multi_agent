@@ -74,6 +74,42 @@ class SkillSpec:
 
 
 @dataclass(frozen=True)
+class HandoffSpec:
+    """节点级接力点（spec v6 §9.8）：从指定上游节点的 transcript 拿原始多轮对话。
+
+    - ``from_node``：DAG JSON 里写逻辑 id（如 ``"n1"``）；
+      ``dag_loader.instantiate_dag`` 实例化时翻译成真实 ``node_id``
+    - ``turn_range``：``[start, end]``（含两端）；``None`` 表示取该 conv 全部 turn
+    """
+
+    from_node: str
+    turn_range: list[int] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "from_node": self.from_node,
+            "turn_range": list(self.turn_range) if self.turn_range else None,
+        }
+
+    @classmethod
+    def from_obj(cls, obj: Any) -> "HandoffSpec":
+        if not isinstance(obj, dict):
+            raise TypeError(f"handoff must be a dict, got {type(obj).__name__}")
+        from_node = obj.get("from_node")
+        if not isinstance(from_node, str) or not from_node:
+            raise ValueError("handoff.from_node is required and must be a non-empty string")
+        tr = obj.get("turn_range")
+        if tr is not None:
+            if not isinstance(tr, list) or len(tr) != 2:
+                raise ValueError("handoff.turn_range must be a [start, end] list")
+            if not all(isinstance(x, int) and x > 0 for x in tr):
+                raise ValueError("handoff.turn_range elements must be positive ints")
+            if tr[0] > tr[1]:
+                raise ValueError(f"handoff.turn_range start({tr[0]}) > end({tr[1]})")
+        return cls(from_node=from_node, turn_range=tr)
+
+
+@dataclass(frozen=True)
 class MCPServerSpec:
     """sandbox 内启动的 MCP server。阶段 C 落地握手 + tool 路由。"""
 
@@ -112,6 +148,7 @@ class AgentHarness:
     tools: list[ToolSpec] = field(default_factory=list)
     skills: list[SkillSpec] = field(default_factory=list)
     mcp_servers: list[MCPServerSpec] = field(default_factory=list)
+    handoff: HandoffSpec | None = None
 
     def is_empty(self) -> bool:
         return (
@@ -121,6 +158,7 @@ class AgentHarness:
             and not self.tools
             and not self.skills
             and not self.mcp_servers
+            and self.handoff is None
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -131,6 +169,7 @@ class AgentHarness:
             "tools": [t.to_dict() for t in self.tools],
             "skills": [s.to_dict() for s in self.skills],
             "mcp_servers": [m.to_dict() for m in self.mcp_servers],
+            "handoff": self.handoff.to_dict() if self.handoff else None,
         }
 
     def to_json(self) -> str:
@@ -144,6 +183,7 @@ class AgentHarness:
             data = json.loads(data) if data else {}
         if not isinstance(data, dict):
             raise TypeError(f"harness must be dict, got {type(data).__name__}")
+        handoff = HandoffSpec.from_obj(data["handoff"]) if data.get("handoff") else None
         return cls(
             model=data.get("model"),
             provider=data.get("provider"),
@@ -153,6 +193,7 @@ class AgentHarness:
             mcp_servers=[
                 MCPServerSpec.from_obj(m) for m in (data.get("mcp_servers") or [])
             ],
+            handoff=handoff,
         )
 
     @classmethod

@@ -1,0 +1,45 @@
+{
+  "dag_id": "coop_demo",
+  "description": "spec v6 §9.8 协作模型演示：reviewer 节点通过 harness.handoff 切入 research 节点的完整多轮 transcript（含 tool_call / tool_result），看到 research 的思考链路而不只是提炼后的一句话。",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "research",
+      "deps": [],
+      "failure_policy": "fail_retry",
+      "harness": {
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "system_prompt": "你是「调研 Agent」。任务是给出 X 主题的 3 条关键事实。**必须**至少调用 1 次 web_search 工具拿回真实搜索结果再下结论；事实之间用编号区分；产出格式：层级 Markdown。",
+        "tools": [
+          {"name": "web_search", "description": "联网搜 DuckDuckGo"},
+          {"name": "read_file"}
+        ],
+        "skills": [
+          {"name": "fact-check"}
+        ]
+      }
+    },
+    {
+      "id": "n2",
+      "name": "reviewer",
+      "deps": ["n1"],
+      "failure_policy": "fail_fast",
+      "memory_level": "task_conclusion",
+      "harness": {
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "system_prompt": "你是「评审 Agent」。你能看到上游 research Agent 的**完整多轮 transcript**（包含它的初始提示、所有 web_search 调用 / 返回结果、最终结论）。你的任务：(1) 评估 research 的搜索关键词是否合理；(2) 指出 research 是否遗漏了关键追问；(3) 综合给出最终结论。**不要只看它的提炼结论，必须引用至少一个 turn 编号的具体内容来支撑你的评审。**",
+        "tools": [
+          {"name": "write_file"}
+        ],
+        "skills": [
+          {"name": "structured-output"}
+        ],
+        "handoff": {
+          "from_node": "n1"
+        }
+      }
+    }
+  ]
+}

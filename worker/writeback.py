@@ -1,8 +1,9 @@
-"""阶段 2 回写（spec v4 §6.2）。
+"""阶段 2 回写（spec v4 §6.2，v6 升级多轮 transcript）。
 
 严格三步顺序：
 
-1. 写 ``transcript``（叶子数据）
+1. 写 ``transcript``（叶子数据）—— v6 起若有 ``loop_result`` 则用
+   ``add_tool_loop_turns`` 拆成多个 turn（含 tool_call / tool_result / final）
 2. 写 ``memory`` 但 ``status="pending"``（对其他 Worker 不可见）
 3. **唯一提交点**：状态库一个事务里写 ``dag_nodes.status=done`` + ``output_memory_id``
    + ``finished_at``；事务成功后立即调 ``memory_store.update_status(pending→active)``。
@@ -29,11 +30,12 @@ _log = logging.getLogger(__name__)
 
 @dataclass
 class WritebackResult:
-    transcript_id: str
+    transcript_id: str           # 兼容老调用；多轮场景为 final turn 的 id
     memory_id: Optional[str]
     memory_doc: Optional[str]
     committed: bool
     chroma_activated: bool
+    transcript_turn_count: int = 1  # v6：实际写入的 turn 数
 
 
 async def writeback_turn(
@@ -49,21 +51,36 @@ async def writeback_turn(
     turn_index: int,
     user_input: str,
     agent_output: str,
+    loop_result=None,  # v6：worker.tool_loop.ToolLoopResult；非空走多轮 transcript
     chroma_update_hook: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> WritebackResult:
     """执行 §6.2 三步回写。
 
     ``chroma_update_hook`` 用于故障注入测试：在第 3 步 (b) 真正调 Chroma update 之前
     先 await 它，hook 可抛异常模拟「事务成功但 Chroma 更新失败」。
+
+    v6：传 ``loop_result`` 时 transcript 拆成多轮（user/tool_call/tool_result/final），
+    否则维持单轮（turn_index=1, kind="single"）兼容老路径。
     """
-    # 第 1 步
-    transcript_id = await transcript_store.add_turn(
-        conversation_id=conversation_id,
-        turn_index=turn_index,
-        user_input=user_input,
-        agent_output=agent_output,
-        agent_id=agent.agent_id,
-    )
+    # 第 1 步：transcript（v6 多轮）
+    if loop_result is not None:
+        ids = await transcript_store.add_tool_loop_turns(
+            conversation_id=conversation_id,
+            agent_id=agent.agent_id,
+            initial_user_input=user_input,
+            loop_result=loop_result,
+        )
+        transcript_id = ids[-1]  # final turn 的 id
+        transcript_turn_count = len(ids)
+    else:
+        transcript_id = await transcript_store.add_turn(
+            conversation_id=conversation_id,
+            turn_index=turn_index,
+            user_input=user_input,
+            agent_output=agent_output,
+            agent_id=agent.agent_id,
+        )
+        transcript_turn_count = 1
 
     # 第 2 步：写 pending 记忆。memory_level 从 dag_nodes 取（spec §8.3）。
     doc = await agent.distill(user_input, agent_output)
@@ -97,6 +114,7 @@ async def writeback_turn(
             memory_doc=None,
             committed=False,
             chroma_activated=False,
+            transcript_turn_count=transcript_turn_count,
         )
 
     # 第 3 步 (b)：Chroma update pending → active；失败留给类 2 修
@@ -120,4 +138,5 @@ async def writeback_turn(
         memory_doc=doc or None,
         committed=True,
         chroma_activated=chroma_activated,
+        transcript_turn_count=transcript_turn_count,
     )

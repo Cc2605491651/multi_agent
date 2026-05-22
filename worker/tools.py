@@ -143,17 +143,54 @@ class RunCodeTool:
 
 
 _WEB_SEARCH_SCRIPT = textwrap.dedent('''\
-import sys, json, urllib.parse, urllib.request, html, re
+import sys, os, json, urllib.parse, urllib.request, html, re, ssl
+
 q = sys.argv[1]
 max_results = int(sys.argv[2]) if len(sys.argv) > 2 else 5
-url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": q})
-req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-try:
-    with urllib.request.urlopen(req, timeout=15) as r:
-        body = r.read().decode("utf-8", "replace")
-except Exception as e:
-    print(json.dumps({"error": str(e)})); sys.exit(0)
-# 极简解析：抓 <a class="result__a" href="...">title</a> 和 <a class="result__snippet">
+
+# 多端点 fallback；尊重宿主 HTTP_PROXY/HTTPS_PROXY env
+endpoints = [
+    ("https://duckduckgo.com/html/", "q"),
+    ("https://html.duckduckgo.com/html/", "q"),
+]
+proxies = {
+    "http": os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or "",
+    "https": os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or "",
+}
+if proxies["http"] or proxies["https"]:
+    handler = urllib.request.ProxyHandler({k: v for k, v in proxies.items() if v})
+    opener = urllib.request.build_opener(handler)
+    urllib.request.install_opener(opener)
+
+# 模拟较真实的 UA 降低被屏蔽概率
+headers = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
+ctx = ssl.create_default_context()
+
+errors = []
+body = None
+for ep, key in endpoints:
+    url = ep + "?" + urllib.parse.urlencode({key: q})
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12, context=ctx) as r:
+            body = r.read().decode("utf-8", "replace")
+            break
+    except Exception as e:
+        errors.append(f"{ep}: {e}")
+        continue
+
+if body is None:
+    print(json.dumps({
+        "error": "all endpoints failed",
+        "details": errors,
+        "hint": "若本机走代理，请确保 HTTP_PROXY/HTTPS_PROXY env 已设并被沙箱继承；macOS 上 DuckDuckGo HTML 端点偶尔会限流，可换 SerpAPI 或 Bing 自建。",
+    }, ensure_ascii=False))
+    sys.exit(0)
+
 pat = re.compile(r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
 snip = re.compile(r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>', re.S)
 links = pat.findall(body)[:max_results]
@@ -163,11 +200,13 @@ def clean(s):
     return html.unescape(s).strip()
 results = []
 for i, (u, t) in enumerate(links):
-    results.append({
-        "title": clean(t),
-        "url": u,
-        "snippet": clean(snippets[i]) if i < len(snippets) else "",
-    })
+    results.append({"title": clean(t), "url": u,
+                    "snippet": clean(snippets[i]) if i < len(snippets) else ""})
+if not results:
+    print(json.dumps({"error": "no results parsed (DDG HTML may have changed)",
+                      "hint": "可手写 SerpAPI client 替代",
+                      "raw_size": len(body)}, ensure_ascii=False))
+    sys.exit(0)
 print(json.dumps({"results": results}, ensure_ascii=False))
 ''')
 

@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from storage.memory_store import MemoryStore
 from storage.state_store import DagNodeRow, StateStore, TaskRow
 from storage.transcript_store import TranscriptStore
 
@@ -30,6 +31,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DASHBOARD_DIR = _PROJECT_ROOT / "dashboard"
 _DEFAULT_STATE_DB = _PROJECT_ROOT / "data" / "state.db"
 _DEFAULT_TRANSCRIPT_DB = _PROJECT_ROOT / "data" / "transcript.db"
+_DEFAULT_CHROMA_DIR = _PROJECT_ROOT / "data" / "chroma"
 
 
 def _node_to_dict(n: DagNodeRow) -> dict[str, Any]:
@@ -86,6 +88,7 @@ def _task_to_dict(t: TaskRow) -> dict[str, Any]:
 def create_app(
     state_db_path: str | Path | None = None,
     transcript_db_path: str | Path | None = None,
+    chroma_dir: str | Path | None = None,
 ) -> FastAPI:
     db_path = Path(state_db_path) if state_db_path else _DEFAULT_STATE_DB
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +96,16 @@ def create_app(
 
     tdb_path = Path(transcript_db_path) if transcript_db_path else _DEFAULT_TRANSCRIPT_DB
     transcript = TranscriptStore(tdb_path)
+
+    chroma_path = Path(chroma_dir) if chroma_dir else _DEFAULT_CHROMA_DIR
+    chroma_path.mkdir(parents=True, exist_ok=True)
+    # 懒初始化 memory_store（chroma 启动慢）
+    memory_holder: dict[str, MemoryStore | None] = {"ms": None}
+
+    def _get_memory() -> MemoryStore:
+        if memory_holder["ms"] is None:
+            memory_holder["ms"] = MemoryStore(chroma_path)
+        return memory_holder["ms"]
 
     app = FastAPI(title="multi_agent dashboard API", version="0.5.0")
     app.add_middleware(
@@ -121,6 +134,34 @@ def create_app(
             "task": _task_to_dict(task),
             "nodes": [_node_to_dict(n) for n in nodes],
         }
+
+    @app.get("/api/memory")
+    async def memory_get(
+        user_id: str = Query(...),
+        mem_ids: str = Query(..., description="逗号分隔的 mem id 列表"),
+    ) -> dict[str, Any]:
+        """按 id 取一组记忆的完整文本（仪表盘「接力证据」面板用）。"""
+        ids = [m.strip() for m in mem_ids.split(",") if m.strip()]
+        if not ids:
+            return {"items": []}
+        try:
+            results = await _get_memory().get_by_ids(user_id, ids)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=str(e))
+        # 保持请求顺序
+        by_id = {r["id"]: r for r in results}
+        items = []
+        for mid in ids:
+            r = by_id.get(mid)
+            if r is None:
+                items.append({"id": mid, "document": None, "metadata": None})
+            else:
+                items.append({
+                    "id": r["id"],
+                    "document": r["document"],
+                    "metadata": r.get("metadata", {}),
+                })
+        return {"items": items}
 
     @app.get("/api/node-transcript")
     async def node_transcript(

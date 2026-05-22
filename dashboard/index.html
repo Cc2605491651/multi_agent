@@ -179,6 +179,7 @@
     padding: 2px 9px; border-radius: 999px;
     font-size: 11px; font-weight: 800;
     border: 1.5px solid currentColor;
+    white-space: nowrap;
   }
   .badge.running { color: var(--blue); background: var(--blue-bg); }
   .badge.done { color: var(--green); background: var(--green-bg); }
@@ -200,6 +201,7 @@
     min-width: 0; min-height: 0;
     padding: 14px;
     display: flex; flex-direction: column;
+    position: relative;
   }
   .runtime-shell {
     flex: 1; min-height: 0;
@@ -233,13 +235,20 @@
     background:
       radial-gradient(circle at 20% 12%, rgba(255, 234, 162, .4), transparent 30%),
       var(--paper);
+    cursor: grab;
   }
+  .board-wrap:active { cursor: grabbing; }
   .board {
     position: relative;
     width: 1400px; height: 800px;
     transform-origin: top left;
     transition: transform .35s ease-out;
   }
+  #nodes-layer {
+    position: absolute; inset: 0;
+    pointer-events: none;
+  }
+  #nodes-layer .node { pointer-events: auto; }
   .legend {
     position: absolute; left: 14px; top: 14px; z-index: 4;
     display: flex; flex-wrap: wrap; gap: 12px;
@@ -456,9 +465,18 @@
   .turn .text {
     font-size: 11.5px; line-height: 1.45;
     word-break: break-word;
-    max-height: 100px; overflow: hidden;
     color: var(--ink);
   }
+  .turn .text-full {
+    font-size: 11.5px; line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-wrap;
+    margin-top: 4px; padding: 6px 8px;
+    background: var(--paper-2); border-radius: 6px;
+    max-height: 320px; overflow: auto;
+  }
+  .turn.expanded .text { display: none; }
+  .turn.expanded .text-full { display: block !important; }
   .turn time { font-size: 10px; color: var(--muted); white-space: nowrap; }
 
   .link-row {
@@ -469,6 +487,59 @@
 
   .empty-inspector {
     padding: 40px 14px; text-align: center; color: var(--muted); font-style: italic;
+  }
+
+  /* === 完整 transcript Modal === */
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(46, 41, 34, .45);
+    display: none; align-items: center; justify-content: center;
+    backdrop-filter: blur(2px);
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal-panel {
+    width: 78vw; max-width: 920px; max-height: 86vh;
+    background: var(--paper);
+    border: 3px solid var(--ink); border-radius: 18px;
+    box-shadow: 6px 8px 0 var(--shadow);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 18px;
+    border-bottom: 2px dashed rgba(46, 41, 34, .35);
+    background: var(--paper-2);
+  }
+  .modal-head h2 { margin: 0; font-size: 16px; font-weight: 900; }
+  .modal-head .close {
+    width: 28px; height: 28px; border: 2px solid var(--ink); border-radius: 50%;
+    background: var(--panel); cursor: pointer; font-weight: 900;
+  }
+  .modal-body { padding: 14px 18px; overflow-y: auto; flex: 1; }
+  .modal-body .meta {
+    display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;
+    padding-bottom: 12px; border-bottom: 1px dashed rgba(46, 41, 34, .25);
+  }
+  .modal-body .turn-full {
+    margin-bottom: 10px; padding: 10px 12px;
+    background: var(--panel);
+    border: 1.5px solid var(--ink); border-radius: 10px;
+    border-left-width: 4px;
+  }
+  .modal-body .turn-full.user { border-left-color: var(--blue); }
+  .modal-body .turn-full.tool_call { border-left-color: var(--orange); }
+  .modal-body .turn-full.tool_result { border-left-color: var(--green); }
+  .modal-body .turn-full.final, .modal-body .turn-full.single { border-left-color: var(--purple); }
+  .modal-body .turn-full.assistant { border-left-color: var(--gray); }
+  .modal-body .turn-full .head {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+    font-size: 11px; color: var(--muted); font-weight: 700;
+  }
+  .modal-body .turn-full pre {
+    margin: 0; padding: 8px 10px;
+    background: var(--paper-2); border-radius: 6px;
+    font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word;
+    max-height: 280px; overflow: auto;
   }
 
   /* === 杂项 === */
@@ -590,6 +661,17 @@
   </aside>
 </div>
 
+<!-- 完整 transcript modal -->
+<div class="modal-backdrop" id="tx-modal">
+  <div class="modal-panel">
+    <div class="modal-head">
+      <h2 id="tx-modal-title">完整 transcript</h2>
+      <button class="close" onclick="closeTranscriptModal()">×</button>
+    </div>
+    <div class="modal-body" id="tx-modal-body"></div>
+  </div>
+</div>
+
 <script>
 /* =========================================================
  * multi_agent 运行时观察台 · GSAP + dagre + 双类型边
@@ -601,6 +683,8 @@ const TASKS_POLL_MS = 5000;
 let currentTaskId = null;
 let prevSnapshot = {};      // node_id → status
 let currentData = null;     // 最近一次 dag-status
+let lastTopo = '';          // 拓扑指纹，diff 用
+let lastNodeIds = new Set(); // 上次渲染过的节点 id（diff 用）
 let pollHandle = null;
 let paused = false;
 let showHandoff = true;
@@ -608,6 +692,7 @@ let onlyErrors = false;
 let nodePositions = {};      // node_id → {x, y} 拖动后覆写
 let selectedNodeId = null;
 let boardScale = 1.0;
+let boardPan = { x: 0, y: 0 };
 let beadTweens = [];
 
 const $ = (id) => document.getElementById(id);
@@ -758,8 +843,10 @@ function selectTask(tid) {
   currentTaskId = tid;
   prevSnapshot = {};
   currentData = null;
+  lastTopo = '';
   nodePositions = {};
   selectedNodeId = null;
+  boardPan = { x: 0, y: 0 };
   $('inspector-body').innerHTML = '<div class="empty-inspector">点击图中节点查看运行档案</div>';
   refreshTaskList();
   refreshDag(true);
@@ -779,10 +866,9 @@ async function refreshDag(forceRebuild) {
 
     updateTopMetrics(data.nodes);
 
-    const topoNow = data.nodes.map(n => n.id).sort().join(',');
-    const topoBefore = currentData && currentData.__topo;
-    const topologyChanged = !topoBefore || topoBefore !== topoNow;
-    currentData.__topo = topoNow;
+    const topoNow = data.nodes.map(n => n.id).sort().join('|');
+    const topologyChanged = lastTopo !== topoNow;
+    lastTopo = topoNow;
 
     if (forceRebuild || topologyChanged) {
       renderBoard(data);
@@ -1043,10 +1129,17 @@ function diffAndAnimate(data) {
   });
   applyOnlyErrors();
   updateTopMetrics(data.nodes);
-  // 如果当前选中节点状态变了，刷新右栏
+  // 只在选中节点的「关键字段」真变化时才重 render inspector
+  // 防止 1.5s 轮询把 system prompt 展开 / 滚动位置 / 卡片折叠状态清掉
   if (selectedNodeId) {
     const n = data.nodes.find(x => x.id === selectedNodeId);
-    if (n) renderInspector(n);
+    if (n) {
+      const sig = nodeSignature(n);
+      if (sig !== lastInspectorSignature) {
+        lastInspectorSignature = sig;
+        renderInspector(n);
+      }
+    }
   }
 }
 
@@ -1164,21 +1257,32 @@ function rerouteEdges() {
 }
 
 /* === 右栏：节点档案 === */
+// 用于防刷新覆盖：记录每个节点上次 render inspector 时的状态指纹
+let lastInspectorSignature = '';
+function nodeSignature(n) {
+  return [n.id, n.status, n.retry_count, n.output_memory_id, n.heartbeat_at, n.finished_at].join('|');
+}
+
 function selectNode(nodeId) {
   selectedNodeId = nodeId;
+  lastInspectorSignature = '';  // 强制刷新一次
   nodesLayer.querySelectorAll('.node').forEach(n => n.classList.toggle('selected', n.dataset.nodeId === nodeId));
   const n = (currentData?.nodes || []).find(x => x.id === nodeId);
   if (n) renderInspector(n);
 }
 
+// 全局缓存当前选中节点的 system prompt（供 modal 使用）
+let currentSystemPrompt = '';
+
 async function renderInspector(n) {
   const harness = n.harness || {};
   const idx = (currentData?.nodes || []).findIndex(x => x.id === n.id) + 1;
+  currentSystemPrompt = harness.system_prompt || '';
 
   const modelChips = (harness.provider || harness.model)
     ? `${harness.provider ? `<span class="mini">${escapeHtml(harness.provider)}</span>` : ''}
        ${harness.model ? `<span class="mini blue">${escapeHtml(harness.model)}</span>` : ''}`
-    : '<span style="color:var(--muted)">（默认）</span>';
+    : '<span style="color:var(--muted)">（系统默认）</span>';
 
   const toolChips = (harness.tools || []).map(t =>
     `<span class="mini blue" title="${escapeHtml(t.description||'')}">${escapeHtml(t.name)}</span>`
@@ -1193,32 +1297,26 @@ async function renderInspector(n) {
     return `<span class="mini" title="${escapeHtml(cmd)}">${escapeHtml(m.name)}</span>`;
   }).join('') || '<span style="color:var(--muted)">（无）</span>';
 
-  const inputMems = (n.input_memory_ids || []).map((m, i) =>
-    m ? `<span class="mini green" title="${escapeHtml(m)}">${escapeHtml((m||'').slice(0, 14))}…</span>`
-      : `<span class="mini null">上游 #${i+1} 跳过/缺失</span>`
-  ).join('') || '<span style="color:var(--muted)">（无）</span>';
-
-  const outputMem = n.output_memory_id
-    ? `<span class="mini green" title="${escapeHtml(n.output_memory_id)}">${escapeHtml(n.output_memory_id.slice(0, 16))}…</span>`
-    : '<span style="color:var(--muted)">（无）</span>';
+  // 接力证据：先放占位，下面拉 /api/memory 填真文本
+  const memCount = (n.input_memory_ids || []).filter(Boolean).length;
+  const totalUpstream = (n.input_memory_ids || []).length;
+  const skippedCount = totalUpstream - memCount;
 
   const handoffBlock = harness.handoff
     ? `
-      <div>HandoffSpec</div>
+      <div>对话接力配置</div>
       <div>
-        <span class="mini purple">from_node = ${escapeHtml(harness.handoff.from_node)}</span>
+        <span class="mini purple" title="上游节点的 DAG 内部 id（运行时翻译）">来源：${escapeHtml((currentData?.nodes||[]).find(x=>x.id===harness.handoff.from_node)?.name || '?')}</span>
         ${harness.handoff.turn_range
-          ? `<span class="mini purple">turn_range = [${harness.handoff.turn_range.join(', ')}]</span>`
-          : '<span class="mini purple">turn_range = 全部</span>'}
+          ? `<span class="mini purple">取第 ${harness.handoff.turn_range[0]}-${harness.handoff.turn_range[1]} 轮</span>`
+          : '<span class="mini purple">取全部对话</span>'}
       </div>
     `
-    : '<div>HandoffSpec</div><div><span style="color:var(--muted)">（无节点级接力）</span></div>';
+    : '<div>对话接力配置</div><div><span style="color:var(--muted)">（本节点不切入上游对话）</span></div>';
 
   const systemPromptBlock = harness.system_prompt
-    ? `<details style="margin-top:8px">
-         <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-weight:700">展开 system prompt</summary>
-         <pre style="margin:6px 0 0 0; padding:8px; background:var(--paper-2); border:1px solid var(--hairline); border-radius:8px; font-size:11px; white-space:pre-wrap; word-break:break-word">${escapeHtml(harness.system_prompt)}</pre>
-       </details>`
+    ? `<button class="control" style="margin-top:8px; padding:5px 12px; font-size:11px"
+              onclick="openSystemPromptModal('${escapeHtml(displayName(n.name))}')">查看完整提示词 ↗</button>`
     : '';
 
   $('inspector-body').innerHTML = `
@@ -1226,101 +1324,224 @@ async function renderInspector(n) {
       <div class="inspect-head">
         <div>
           <h2><span class="num">${idx}</span> ${escapeHtml(displayName(n.name))}</h2>
-          <code>${escapeHtml(n.name)} · ${escapeHtml(n.id)}</code>
+          <code title="${escapeHtml(n.id)}">${escapeHtml(n.name)}</code>
         </div>
         <span class="badge ${statusBadgeClass(n.status)}">${statusZh(n.status)}</span>
       </div>
       <div class="form-grid" style="margin-top:10px">
-        <div>失败策略</div><div><span class="mini">${escapeHtml(n.failure_policy)}</span></div>
-        <div>重试</div><div><span class="mini">${n.retry_count} / ${n.max_retries}</span></div>
-        <div>记忆层级</div><div><span class="mini">${escapeHtml(n.memory_level)}</span></div>
+        <div>失败时怎么办</div><div><span class="mini">${failurePolicyZh(n.failure_policy)}</span></div>
+        <div>重试次数</div><div><span class="mini">${n.retry_count} / ${n.max_retries}</span></div>
+        <div>产出层级</div><div><span class="mini">${memoryLevelZh(n.memory_level)}</span></div>
       </div>
     </section>
 
     <section class="inspect-card">
-      <h3>🛡 HARNESS 装备</h3>
+      <h3>🛡 装备（HARNESS）</h3>
       <div class="form-grid">
-        <div>Provider / Model</div><div>${modelChips}</div>
-        <div>工具 (Tools)</div><div>${toolChips}</div>
-        <div>技能 (Skills)</div><div>${skillChips}</div>
-        <div>MCP Servers</div><div>${mcpChips}</div>
+        <div>厂商 / 模型</div><div>${modelChips}</div>
+        <div>工具</div><div>${toolChips}</div>
+        <div>技能</div><div>${skillChips}</div>
+        <div>MCP 服务器</div><div>${mcpChips}</div>
       </div>
       ${systemPromptBlock}
     </section>
 
     <section class="inspect-card subtle">
-      <h3>🟢 接力证据 (memory_store)</h3>
-      <div class="form-grid">
-        <div>input_memory_ids (${(n.input_memory_ids||[]).length})</div><div>${inputMems}</div>
-        <div>output_memory_id</div><div>${outputMem}</div>
-        <div>memory_store</div><div><span class="mini green">精确指针接力（input_memory_ids 路径）</span></div>
+      <h3>🟢 上游产出（精确接力 · memory_store）</h3>
+      <div class="form-grid" style="margin-bottom:8px">
+        <div>上游接力</div>
+        <div>
+          <span class="mini green">${memCount} 条结论</span>
+          ${skippedCount > 0 ? `<span class="mini null">${skippedCount} 路跳过</span>` : ''}
+        </div>
+        <div>本节点产出</div>
+        <div>${n.output_memory_id
+          ? `<span class="mini green">已写入记忆库</span>`
+          : '<span style="color:var(--muted)">（尚未产出）</span>'}</div>
       </div>
+      <div id="memory-content"></div>
     </section>
 
     <section class="inspect-card subtle">
-      <h3>🟣 多轮 TRANSCRIPT (v6, transcript_store)</h3>
+      <h3>🟣 对话记录（多轮 · v6）</h3>
       <div class="form-grid" style="margin-bottom:10px">
-        <div>conv_id</div>
-        <div><span class="mini purple">conv_${escapeHtml(currentTaskId)}_${escapeHtml(n.id)}</span></div>
         ${handoffBlock}
       </div>
       <div id="transcript-timeline">
-        <div class="empty-inspector" style="padding:20px">加载 transcript…</div>
+        <div class="empty-inspector" style="padding:20px">加载对话…</div>
       </div>
-      <div class="link-row" id="open-full-transcript">查看完整 transcript ↗</div>
+      <div class="link-row" onclick="openTranscriptModal('${escapeHtml(n.id)}', '${escapeHtml(displayName(n.name))}')">查看完整对话 ↗</div>
     </section>
 
     <section class="inspect-card">
       <h3>⏱ 运行时</h3>
       <div class="runtime-grid">
-        <div class="k">worker_id</div><div class="v">${escapeHtml(n.worker_id || '—')}</div>
-        <div class="k">heartbeat_at</div><div class="v">${formatDateFull(n.heartbeat_at)}</div>
-        <div class="k">started_at</div><div class="v">${formatDateFull(n.started_at)}</div>
-        <div class="k">finished_at</div><div class="v">${formatDateFull(n.finished_at)}</div>
-        <div class="k">运行时长</div><div class="v">${formatDuration(n.started_at, n.finished_at)}</div>
+        <div class="k">执行者</div><div class="v">${escapeHtml(n.worker_id || '—')}</div>
+        <div class="k">最近心跳</div><div class="v">${formatDateFull(n.heartbeat_at)}</div>
+        <div class="k">开始时间</div><div class="v">${formatDateFull(n.started_at)}</div>
+        <div class="k">完成时间</div><div class="v">${formatDateFull(n.finished_at)}</div>
+        <div class="k">用时</div><div class="v">${formatDuration(n.started_at, n.finished_at)}</div>
       </div>
     </section>
   `;
 
-  // 异步加载 transcript
+  // 异步拉接力证据（真文本）
+  loadMemoryContent(n);
+
+  // 异步加载 transcript 摘要
   try {
     const t = await fetchJSON(`/api/node-transcript?task_id=${currentTaskId}&node_id=${n.id}`);
     const tl = $('transcript-timeline');
     if (!tl) return;
     if (t.count === 0) {
-      tl.innerHTML = '<div style="color:var(--muted);font-size:11.5px;font-style:italic">（节点尚未产生 transcript）</div>';
+      tl.innerHTML = '<div style="color:var(--muted);font-size:11.5px;font-style:italic">（本节点尚未产生对话记录）</div>';
       return;
     }
-    tl.innerHTML = `<div class="timeline">${t.turns.map(turn => {
-      const meta = turn.turn_meta || {};
-      let label = turn.turn_kind;
-      let text = '';
-      if (turn.turn_kind === 'user' || turn.turn_kind === 'single') {
-        text = turn.user_input || turn.agent_output || '';
-      } else if (turn.turn_kind === 'tool_call') {
-        text = `${meta.tool_name || ''}(${escapeHtml(JSON.stringify(meta.args || {}).slice(0, 200))})`;
-      } else if (turn.turn_kind === 'tool_result') {
-        text = turn.agent_output || '';
-      } else {
-        text = turn.agent_output || '';
-      }
-      const labelMap = { user:'user', tool_call:'tool_call', tool_result:'tool_result', final:'final', single:'final', assistant:'assistant' };
-      return `
-        <div class="turn ${turn.turn_kind}">
-          <div class="idx">turn ${turn.turn_index}</div>
-          <div class="body">
-            <b>${escapeHtml(labelMap[turn.turn_kind] || turn.turn_kind)}</b>
-            <div class="text">${escapeHtml(String(text).slice(0, 400))}${text.length > 400 ? '…' : ''}</div>
+    tl.innerHTML = `
+      <div style="font-size:11px; color:var(--muted); margin-bottom:6px">共 ${t.count} 轮 · 点击任一轮展开全文</div>
+      <div class="timeline">${t.turns.map(turn => {
+        const meta = turn.turn_meta || {};
+        let text = '';
+        if (turn.turn_kind === 'tool_call') {
+          text = `调用 ${meta.tool_name || '?'}(${JSON.stringify(meta.args || {}).slice(0, 200)})`;
+        } else if (turn.turn_kind === 'tool_result') {
+          text = (meta.is_error ? '[错误] ' : '') + (turn.agent_output || '');
+        } else {
+          text = turn.user_input || turn.agent_output || '';
+        }
+        const labelMap = { user:'用户输入', tool_call:'工具调用', tool_result:'工具结果', final:'最终输出', single:'输出', assistant:'助手' };
+        const safe = String(text);
+        return `
+          <div class="turn ${turn.turn_kind}" onclick="this.classList.toggle('expanded')" style="cursor:pointer">
+            <div class="idx">第 ${turn.turn_index} 轮</div>
+            <div class="body">
+              <b>${escapeHtml(labelMap[turn.turn_kind] || turn.turn_kind)}</b>
+              <div class="text">${escapeHtml(safe.slice(0, 100))}${safe.length > 100 ? '…（点击展开）' : ''}</div>
+              <div class="text-full" style="display:none">${escapeHtml(safe)}</div>
+            </div>
+            <time>${formatTime(turn.created_at)}</time>
           </div>
-          <time>${formatTime(turn.created_at)}</time>
-        </div>
-      `;
-    }).join('')}</div>`;
+        `;
+      }).join('')}</div>`;
   } catch (e) {
     const tl = $('transcript-timeline');
     if (tl) tl.innerHTML = `<div style="color:var(--red);font-size:11.5px">加载失败：${escapeHtml(e.message)}</div>`;
   }
 }
+
+async function loadMemoryContent(n) {
+  const container = $('memory-content');
+  if (!container) return;
+
+  const mids = (n.input_memory_ids || []).filter(Boolean);
+  const out = n.output_memory_id ? [n.output_memory_id] : [];
+  const all = [...mids, ...out];
+  if (all.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+  const userId = currentData?.task?.user_id || 'default_user';
+  try {
+    const data = await fetchJSON(`/api/memory?user_id=${encodeURIComponent(userId)}&mem_ids=${encodeURIComponent(all.join(','))}`);
+    container.innerHTML = data.items.map((item, i) => {
+      const isOutput = i >= mids.length;
+      const label = isOutput ? '本节点产出' : `上游产出 #${i + 1}`;
+      const text = item.document || '（记忆已被删除或还未生成）';
+      const safe = String(text);
+      return `
+        <div style="margin-top:8px; padding:8px 10px; background:${isOutput ? 'var(--purple-bg)' : 'var(--green-bg)'};
+                    border-left:3px solid ${isOutput ? 'var(--purple)' : 'var(--green)'}; border-radius:0 8px 8px 0; cursor:pointer"
+             onclick="this.classList.toggle('expanded'); const f=this.querySelector('.mem-full'); const s=this.querySelector('.mem-short'); if(f.style.display==='none'){f.style.display='block';s.style.display='none'}else{f.style.display='none';s.style.display='block'}">
+          <div style="font-size:10.5px; color:${isOutput ? '#5a1f9a' : '#128032'}; font-weight:800; margin-bottom:4px">${label}</div>
+          <div class="mem-short" style="font-size:11.5px; line-height:1.55">${escapeHtml(safe.slice(0, 140))}${safe.length > 140 ? '… 点击展开' : ''}</div>
+          <div class="mem-full" style="font-size:11.5px; line-height:1.55; white-space:pre-wrap; word-break:break-word; display:none">${escapeHtml(safe)}</div>
+        </div>
+      `;
+    }).join('');
+  } catch (e) {
+    container.innerHTML = `<div style="color:var(--red); font-size:11px">记忆加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function failurePolicyZh(p) {
+  return ({fail_retry:'重试（默认）', fail_fast:'整体终止', fail_skip:'跳过本节点'})[p] || p;
+}
+function memoryLevelZh(m) {
+  return ({node_output:'节点产出', task_conclusion:'任务结论'})[m] || m;
+}
+
+function openSystemPromptModal(nodeName) {
+  $('tx-modal-title').textContent = `提示词 · ${nodeName}`;
+  const body = $('tx-modal-body');
+  if (!currentSystemPrompt) {
+    body.innerHTML = '<div class="empty-inspector">（节点未自定义 system prompt）</div>';
+  } else {
+    body.innerHTML = `
+      <div class="meta">
+        <span class="mini">该 prompt 在节点启动时注入给 LLM</span>
+      </div>
+      <pre style="margin:0; padding:14px; background:var(--paper-2); border:1.5px solid var(--ink); border-radius:10px; font-size:13px; line-height:1.65; white-space:pre-wrap; word-break:break-word">${escapeHtml(currentSystemPrompt)}</pre>
+    `;
+  }
+  $('tx-modal').classList.add('open');
+}
+window.openSystemPromptModal = openSystemPromptModal;
+
+/* === 完整 transcript modal === */
+async function openTranscriptModal(nodeId, nodeName) {
+  $('tx-modal-title').textContent = `完整 transcript · ${nodeName}`;
+  const body = $('tx-modal-body');
+  body.innerHTML = '<div class="empty-inspector">加载中…</div>';
+  $('tx-modal').classList.add('open');
+  try {
+    const data = await fetchJSON(`/api/node-transcript?task_id=${currentTaskId}&node_id=${nodeId}`);
+    if (data.count === 0) {
+      body.innerHTML = '<div class="empty-inspector">该节点尚未产生 transcript</div>';
+      return;
+    }
+    body.innerHTML = `
+      <div class="meta">
+        <span class="mini purple">conv_id: ${escapeHtml(data.conversation_id)}</span>
+        <span class="mini">共 ${data.count} 轮</span>
+      </div>
+      ${data.turns.map(t => {
+        const meta = t.turn_meta || {};
+        let body;
+        if (t.turn_kind === 'tool_call') {
+          body = `${escapeHtml(meta.tool_name || '?')}(${escapeHtml(JSON.stringify(meta.args || {}, null, 2))})`;
+        } else if (t.turn_kind === 'tool_result') {
+          body = (meta.is_error ? '[错误] ' : '') + (t.agent_output || '');
+        } else {
+          body = t.user_input || t.agent_output || '';
+        }
+        return `
+          <div class="turn-full ${t.turn_kind}">
+            <div class="head">
+              <span class="mini">turn ${t.turn_index}</span>
+              <span class="mini">${escapeHtml(t.turn_kind)}</span>
+              ${t.agent_id ? `<span class="mini">agent: ${escapeHtml(t.agent_id)}</span>` : ''}
+              <span style="margin-left:auto">${formatTime(t.created_at)}</span>
+            </div>
+            <pre>${escapeHtml(String(body))}</pre>
+          </div>
+        `;
+      }).join('')}
+    `;
+  } catch (e) {
+    body.innerHTML = `<div style="color:var(--red)">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+function closeTranscriptModal() {
+  $('tx-modal').classList.remove('open');
+}
+window.openTranscriptModal = openTranscriptModal;
+window.closeTranscriptModal = closeTranscriptModal;
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeTranscriptModal();
+});
+$('tx-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'tx-modal') closeTranscriptModal();
+});
 
 /* === 控件 === */
 $('btn-refresh').addEventListener('click', () => {
@@ -1377,10 +1598,68 @@ function fitView() {
     1.0
   );
   boardScale = scale;
-  board.style.transform = `scale(${scale})`;
-  board.style.marginLeft = Math.max(14, (wrap.clientWidth - W * scale) / 2) + 'px';
-  board.style.marginTop = Math.max(14, (wrap.clientHeight - H * scale) / 2) + 'px';
+  boardPan = {
+    x: Math.max(14, (wrap.clientWidth - W * scale) / 2),
+    y: Math.max(14, (wrap.clientHeight - H * scale) / 2),
+  };
+  applyBoardTransform();
 }
+function applyBoardTransform() {
+  const board = $('board');
+  if (!board) return;
+  board.style.transform =
+    `translate(${boardPan.x}px, ${boardPan.y}px) scale(${boardScale})`;
+  board.style.marginLeft = '0';
+  board.style.marginTop = '0';
+}
+
+/* === 画布滚轮缩放 + 空白 pan === */
+(function enableBoardInteractions() {
+  const wrap = $('board-wrap');
+  if (!wrap) return;
+
+  // 滚轮缩放（以鼠标为中心）
+  wrap.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey && !e.metaKey && Math.abs(e.deltaY) < 5) return;
+    e.preventDefault();
+    const rect = wrap.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const delta = -e.deltaY * 0.0015;
+    const newScale = Math.min(2.0, Math.max(0.25, boardScale * (1 + delta)));
+    if (newScale === boardScale) return;
+    // 让鼠标点保持锚定
+    const factor = newScale / boardScale;
+    boardPan.x = mx - (mx - boardPan.x) * factor;
+    boardPan.y = my - (my - boardPan.y) * factor;
+    boardScale = newScale;
+    applyBoardTransform();
+  }, { passive: false });
+
+  // 鼠标拖空白 pan
+  let panning = false;
+  let panSx, panSy, panOx, panOy;
+  wrap.addEventListener('mousedown', (e) => {
+    // 点到节点上不 pan（让节点拖动接管）
+    if (e.target.closest('.node')) return;
+    if (e.button !== 0) return;
+    panning = true;
+    panSx = e.clientX; panSy = e.clientY;
+    panOx = boardPan.x; panOy = boardPan.y;
+    wrap.style.cursor = 'grabbing';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!panning) return;
+    boardPan.x = panOx + (e.clientX - panSx);
+    boardPan.y = panOy + (e.clientY - panSy);
+    applyBoardTransform();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!panning) return;
+    panning = false;
+    wrap.style.cursor = '';
+  });
+})();
 
 window.addEventListener('resize', fitView);
 

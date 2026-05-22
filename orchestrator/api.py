@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -101,8 +100,7 @@ def create_app(state_db_path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/tasks")
     async def list_tasks() -> list[dict[str, Any]]:
-        # state_store 没有 list_tasks 接口；这里走 connection 但仍由 state_store 暴露的入口
-        rows = await _list_tasks_raw(state)
+        rows = await state.list_tasks()
         return [_task_to_dict(t) for t in rows]
 
     @app.get("/api/dag-status")
@@ -130,26 +128,3 @@ def create_app(state_db_path: str | Path | None = None) -> FastAPI:
     return app
 
 
-async def _list_tasks_raw(state: StateStore) -> list[TaskRow]:
-    """临时 helper：state_store 没暴露 list_tasks；走 read-only 查询。"""
-    import asyncio
-
-    def _sync() -> list[TaskRow]:
-        with sqlite3.connect(state._db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY created_at DESC"
-            ).fetchall()
-        return [
-            TaskRow(
-                id=r["id"], user_id=r["user_id"], title=r["title"],
-                dag_id=r["dag_id"],
-                handoff_conversation_id=r["handoff_conversation_id"],
-                handoff_turn_range=__import__("json").loads(r["handoff_turn_range"])
-                if r["handoff_turn_range"] else None,
-                status=r["status"], created_at=r["created_at"],
-            )
-            for r in rows
-        ]
-
-    return await asyncio.to_thread(_sync)

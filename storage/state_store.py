@@ -180,6 +180,10 @@ class StateStore:
     async def get_task(self, task_id: str) -> TaskRow | None:
         return await asyncio.to_thread(self._get_task_sync, task_id)
 
+    async def list_tasks(self) -> list[TaskRow]:
+        """列出所有任务，按 ``created_at`` 倒序（仪表盘需要）。"""
+        return await asyncio.to_thread(self._list_tasks_sync)
+
     async def update_task_status(self, task_id: str, status: str) -> None:
         if status not in VALID_TASK_STATUS:
             raise ValueError(f"invalid task status: {status}")
@@ -351,6 +355,13 @@ class StateStore:
             ).fetchone()
         return _row_to_task(row) if row else None
 
+    def _list_tasks_sync(self) -> list[TaskRow]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks ORDER BY created_at DESC"
+            ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
     def _update_task_status_sync(self, task_id: str, status: str) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -505,8 +516,9 @@ class StateStore:
 
     def _find_stale_running_sync(self, threshold_seconds: int) -> list[DagNodeRow]:
         cutoff_dt = datetime.now(timezone.utc).timestamp() - threshold_seconds
+        # 与心跳 _utcnow() 的 milliseconds 精度保持一致，避免字符串比较亚秒抖动
         cutoff_iso = datetime.fromtimestamp(cutoff_dt, tz=timezone.utc).isoformat(
-            timespec="seconds"
+            timespec="milliseconds"
         )
         with self._connect() as conn:
             rows = conn.execute(

@@ -1,10 +1,14 @@
-"""阶段 1 CLI 入口。
+"""CLI 入口（spec v5 全阶段）。
 
 子命令：
 
-- ``demo-phase1``：端到端 demo，跑 5 轮对话 → 提炼 → 检索（spec §11 阶段 1 验收）。
-  ``--mock`` 用预设 stub 不打 API；不加默认走真实 Claude（需 ``ANTHROPIC_API_KEY``）。
-- ``recall-baseline``：阶段 1 任务 1.11 召回质量摸底，输出 P@5。
+- ``demo-phase1`` 5 轮对话 → 提炼 → 检索（阶段 1）
+- ``demo-phase2`` 串行 2 节点 DAG（阶段 2）
+- ``demo-phase3`` 双 Agent + 精确接力（阶段 3）
+- ``demo-phase4a`` spec §5.4 完整 DAG + 三种 failure_policy（阶段 4a）
+- ``run-task --dag --title [--handoff-conv --handoff-range ...]`` 通用 DAG 入口（阶段 4c）
+- ``dashboard-serve --port 8000`` 启动 FastAPI 仪表盘（阶段 5）
+- ``recall-baseline`` / ``recall-baseline-v2`` / ``recall-drift`` 召回质量评估
 """
 
 from __future__ import annotations
@@ -374,6 +378,7 @@ async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
         failure_handler=FailureHandler(state_store, memory_store),
         sub_task_builder=_phase2_sub_task,
         heartbeat_interval=2.0,
+        force_default_client=mock,
     )
     final = await scheduler.run_task(task_id)
     print(f"\n[demo2] task final status: {final}")
@@ -622,6 +627,7 @@ async def run_demo_phase3(*, mock: bool, reset: bool) -> int:
         failure_handler=FailureHandler(state_store, memory_store),
         sub_task_builder=_phase3_sub_task,
         heartbeat_interval=2.0,
+        force_default_client=mock,
     )
     final = await scheduler.run_task(task_id)
     print(f"\n[demo3] task 最终状态: {final}")
@@ -758,6 +764,7 @@ async def run_demo_phase4a(*, mock: bool, reset: bool, fail_b: bool) -> int:
         max_concurrent_workers=3,
         heartbeat_interval=2.0,
         cancel_timeout=2.0,
+        force_default_client=mock,
     )
     final = await scheduler.run_task(task_id)
     print(f"\n[demo4a] task 最终状态: {final}\n")

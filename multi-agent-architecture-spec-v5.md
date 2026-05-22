@@ -687,8 +687,7 @@ multi_agent/
 ├── runtime-dashboard-prototype-v2.html  # 原型（已被真实 dashboard 替代）
 ├── README.md
 ├── .env.example
-├── schema.sql              # 历史脚本，state_store 内嵌 _SCHEMA 才是真源
-└── pyproject.toml
+└── pyproject.toml          # state_store 内嵌 _SCHEMA 是建表真源；schema.sql 已删
 ```
 
 ---
@@ -699,7 +698,7 @@ multi_agent/
 
 | 项 | v4 | v5 |
 |---|---|---|
-| `dag_nodes` 字段 | 13 列 | 16 列（+`memory_level` / `model_name` / `tools` / `harness`） |
+| `dag_nodes` 字段 | 14 列 | 18 列（+`memory_level` / `model_name` / `tools` / `harness`） |
 | 时间戳精度 | seconds | milliseconds（修并发心跳合并 bug） |
 | memory_store 接口 | add/search/get_by_ids/update_status | +delete / +list_pending_for_node / +get_status |
 | AgentHarness | 不存在 | §3.5 新增 |

@@ -173,10 +173,11 @@ function nodesHash(nodes) {
 function renderGraph(nodes) {
   const elements = [];
   const idSet = new Set(nodes.map(n => n.id));
+  const doneSet = new Set(nodes.filter(n => n.status === 'done').map(n => n.id));
   nodes.forEach(n => {
     elements.push({
       data: {
-        id: n.id, label: n.node_name || n.name,
+        id: n.id, label: n.name,
         status: n.status,
         model: n.model_name || '',
         tools: (n.tools || []).join(','),
@@ -188,7 +189,12 @@ function renderGraph(nodes) {
   nodes.forEach(n => {
     (n.deps || []).forEach(dep => {
       if (idSet.has(dep)) {
-        elements.push({ data: { id: `${dep}->${n.id}`, source: dep, target: n.id }});
+        elements.push({
+          data: {
+            id: `${dep}->${n.id}`, source: dep, target: n.id,
+            sourceDone: doneSet.has(dep),
+          },
+        });
       }
     });
   });
@@ -201,7 +207,6 @@ function renderGraph(nodes) {
       { selector: 'node', style: {
         'shape': 'round-rectangle',
         'width': 180, 'height': 64,
-        'background-color': 'data(statusColor)',
         'border-width': 2, 'border-color': '#30363d',
         'label': 'data(label)',
         'color': '#e6edf3', 'text-valign': 'center', 'text-halign': 'center',
@@ -219,7 +224,7 @@ function renderGraph(nodes) {
         'line-color': '#30363d', 'target-arrow-color': '#30363d',
         'width': 2,
       }},
-      { selector: 'edge[?targetDone]', style: { 'line-color': '#3fb950', 'target-arrow-color': '#3fb950' }},
+      { selector: 'edge[?sourceDone]', style: { 'line-color': '#3fb950', 'target-arrow-color': '#3fb950' }},
     ],
     layout: {
       name: 'dagre', rankDir: 'LR',
@@ -233,6 +238,7 @@ function renderGraph(nodes) {
 
 function updateStatuses(nodes) {
   if (!cy) return;
+  const doneSet = new Set(nodes.filter(n => n.status === 'done').map(n => n.id));
   nodes.forEach(n => {
     const node = cy.getElementById(n.id);
     if (node) {
@@ -240,6 +246,10 @@ function updateStatuses(nodes) {
       node.data('retry', n.retry_count);
       node.data('raw', n);
     }
+  });
+  // 让边随上游 done 变绿（spec §11.2「边色随上游 done 变绿」）
+  cy.edges().forEach(edge => {
+    edge.data('sourceDone', doneSet.has(edge.data('source')));
   });
 }
 

@@ -1,8 +1,11 @@
-"""最简 Agent（spec v4 §2 / 阶段 1 任务 1.6）。
+"""Agent + LLMClient 协议（spec v5 §9）。
 
-- 主对话模型默认 ``claude-sonnet-4-6``；
-- 记忆提炼默认 ``claude-haiku-4-5``（决策 D-1.1）；
-- 留出 ``LLMClient`` 协议供测试 stub。
+- 主对话模型默认 ``claude-sonnet-4-6``，记忆提炼默认 ``claude-haiku-4-5``（D-1.1）；
+  节点级 ``harness.model`` 覆盖
+- 单轮 ``respond`` 给 mock 测试 / 无 tool 节点用；多轮 ``run_with_tools``
+  在 harness 声明 tools 时自动启用（按 client 类型分派到 Anthropic / OpenAI tool loop）
+- ``LLMClient`` 协议供 ``worker.llm_clients`` 各 provider 实现 + 测试 stub
+- ``default_client()`` 按 ``LLM_PROVIDER`` env 工厂选 client
 """
 
 from __future__ import annotations

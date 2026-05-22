@@ -290,37 +290,41 @@ class Scheduler:
         )
         handle = await self._sandbox.create(context_package=packed.text)
         active_handles[node.id] = handle
-
-        # 解析节点 harness：覆盖 provider / model / system_prompt + skills + mcp
-        harness = AgentHarness.from_dict(node.harness_json) if node.harness_json else AgentHarness()
-        client = self._client_for_provider(harness.provider)
-        chat_model = harness.model or node.model_name
-
-        # 阶段 C：skill 注入 system_prompt
-        final_system, _ = self._skill_loader.apply(
-            harness.skills, sub_task, harness.system_prompt
-        )
-
-        agent_kwargs: dict = {"agent_id": node.node_name, "client": client}
-        if chat_model:
-            agent_kwargs["chat_model"] = chat_model
-        if final_system:
-            agent_kwargs["system_prompt"] = final_system
-        agent = Agent(**agent_kwargs)
-
-        # 阶段 B+C：合并 builtin tools + MCP tools 进 ToolRegistry
+        # finally 块需要 mcp_clients 可见，先预声明（即使后续 harness 解析抛错也能 close）
         mcp_clients: list = []
-        mcp_tools_list: list = []
-        if harness.mcp_servers:
-            mcp_clients, mcp_tools_list = await mcp_connect_all(harness.mcp_servers)
-
-        registry: ToolRegistry | None = None
-        if harness.tools or mcp_tools_list:
-            registry = ToolRegistry.from_specs(harness.tools)
-            for t in mcp_tools_list:
-                registry.tools[t.name] = t
 
         try:
+            # 解析节点 harness：覆盖 provider / model / system_prompt + skills + mcp
+            harness = (
+                AgentHarness.from_dict(node.harness_json)
+                if node.harness_json else AgentHarness()
+            )
+            client = self._client_for_provider(harness.provider)
+            chat_model = harness.model or node.model_name
+
+            # 阶段 C：skill 注入 system_prompt
+            final_system, _ = self._skill_loader.apply(
+                harness.skills, sub_task, harness.system_prompt
+            )
+
+            agent_kwargs: dict = {"agent_id": node.node_name, "client": client}
+            if chat_model:
+                agent_kwargs["chat_model"] = chat_model
+            if final_system:
+                agent_kwargs["system_prompt"] = final_system
+            agent = Agent(**agent_kwargs)
+
+            # 阶段 B+C：合并 builtin tools + MCP tools 进 ToolRegistry
+            mcp_tools_list: list = []
+            if harness.mcp_servers:
+                mcp_clients, mcp_tools_list = await mcp_connect_all(harness.mcp_servers)
+
+            registry: ToolRegistry | None = None
+            if harness.tools or mcp_tools_list:
+                registry = ToolRegistry.from_specs(harness.tools)
+                for t in mcp_tools_list:
+                    registry.tools[t.name] = t
+
             async with HeartbeatTask(
                 self._state_store, node.id, interval=self._heartbeat_interval
             ):

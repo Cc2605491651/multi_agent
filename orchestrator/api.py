@@ -23,11 +23,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from storage.state_store import DagNodeRow, StateStore, TaskRow
+from storage.transcript_store import TranscriptStore
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DASHBOARD_DIR = _PROJECT_ROOT / "dashboard"
 _DEFAULT_STATE_DB = _PROJECT_ROOT / "data" / "state.db"
+_DEFAULT_TRANSCRIPT_DB = _PROJECT_ROOT / "data" / "transcript.db"
 
 
 def _node_to_dict(n: DagNodeRow) -> dict[str, Any]:
@@ -81,10 +83,16 @@ def _task_to_dict(t: TaskRow) -> dict[str, Any]:
     }
 
 
-def create_app(state_db_path: str | Path | None = None) -> FastAPI:
+def create_app(
+    state_db_path: str | Path | None = None,
+    transcript_db_path: str | Path | None = None,
+) -> FastAPI:
     db_path = Path(state_db_path) if state_db_path else _DEFAULT_STATE_DB
     db_path.parent.mkdir(parents=True, exist_ok=True)
     state = StateStore(db_path)
+
+    tdb_path = Path(transcript_db_path) if transcript_db_path else _DEFAULT_TRANSCRIPT_DB
+    transcript = TranscriptStore(tdb_path)
 
     app = FastAPI(title="multi_agent dashboard API", version="0.5.0")
     app.add_middleware(
@@ -112,6 +120,37 @@ def create_app(state_db_path: str | Path | None = None) -> FastAPI:
         return {
             "task": _task_to_dict(task),
             "nodes": [_node_to_dict(n) for n in nodes],
+        }
+
+    @app.get("/api/node-transcript")
+    async def node_transcript(
+        task_id: str = Query(...),
+        node_id: str = Query(...),
+    ) -> dict[str, Any]:
+        """spec v6 §3.6：返回节点的完整多轮 transcript（含 turn_kind / turn_meta）。
+
+        conv_id 约定 ``conv_{task_id}_{node_id}``（scheduler 写法）。
+        """
+        conv_id = f"conv_{task_id}_{node_id}"
+        total = await transcript.count_turns(conv_id)
+        if total == 0:
+            return {"conversation_id": conv_id, "turns": [], "count": 0}
+        turns = await transcript.get_turns_by_range(conv_id, 1, total)
+        return {
+            "conversation_id": conv_id,
+            "count": total,
+            "turns": [
+                {
+                    "turn_index": t.turn_index,
+                    "agent_id": t.agent_id,
+                    "turn_kind": t.turn_kind,
+                    "user_input": t.user_input,
+                    "agent_output": t.agent_output,
+                    "turn_meta": t.turn_meta,
+                    "created_at": t.created_at,
+                }
+                for t in turns
+            ],
         }
 
     if _DASHBOARD_DIR.exists():

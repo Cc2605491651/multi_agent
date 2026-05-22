@@ -406,10 +406,31 @@ PROVIDERS = {
 - `LLM_BASE_URL` env 可覆盖默认 base_url（自部署兼容服务）
 - `LLM_PROVIDER` env 决定默认 client；`harness.provider` 节点级覆盖
 - scheduler `_client_for_provider` 按 provider 缓存 client，避免重复构造
+- `orchestrator.main` 启动时自动加载项目根 `.env`（`python-dotenv`，
+  `override=False`：shell 里已 export 的优先级高于 `.env`）
+
+**默认推荐配置**（`.env.example` 已按此预填）：
+
+| 角色 | provider | 理由 |
+|---|---|---|
+| 主用 | `deepseek` | 便宜（比 Claude 便宜 10-20 倍）、中文好、长上下文稳 |
+| 备选 | `openrouter` | 一个 key 通 100+ 模型，需要 Claude / GPT 时无缝切 |
+| 高端推理 | `anthropic`（claude-opus-4-7） | 节点级 `harness.provider="anthropic"` 单点用 |
+| 本地 | `ollama` | 离线 / 隐私敏感场景 |
+
+**双重默认陷阱**（实施细节，留意）：
+
+- 代码 fallback：`make_llm_client()` 不传参数 + 无 `LLM_PROVIDER` env →
+  hardcoded `"anthropic"`（`worker/llm_clients.py:make_llm_client`）
+- 新人配置：`.env.example` 给的 `LLM_PROVIDER=deepseek`
+
+复制 `.env.example` → `.env` 后默认 deepseek；直接跑没 `.env` 的环境（如 CI）
+会落到代码 anthropic 默认。两者不一致是有意的：CI 跑测试无 LLM 调用都是 mock，
+hardcoded anthropic 不会真打外网；新人开发期推 deepseek 走便宜 API。
 
 **禁止做**（详见 plan 讨论）：复用 Claude Code / Codex 的 OAuth 凭证来"省订阅"
 是违反 Anthropic / OpenAI ToS 的，账号封禁风险大。便宜的 provider 用 DeepSeek
-（比 Anthropic 便宜 10-20 倍）或 OpenRouter 即可。
+或 OpenRouter 即可。
 
 ### 9.2 Tool-use 多轮循环
 
@@ -541,6 +562,28 @@ node.harness 反序列化为 AgentHarness
 向后兼容：harness 任意字段为空都退化到合理默认（无 tool→单轮 respond，无 skill→
 直接用 harness.system_prompt 或 Agent 默认，无 mcp→只用内置工具）。
 
+### 9.7 Planner Agent（未来方向，未实施）
+
+> 当前：DAG JSON 手写。`dags/research_report.json` 是 6 节点示例，新增任务需要人工
+> 复制改造一份。
+>
+> 方向：增加 `orchestrator/planner.py` + CLI `plan-task --goal "..."`：
+>
+> 1. 用户给一句自然语言目标
+> 2. Planner Agent（建议用 `deepseek-chat`，DAG 设计不需要 opus）按 §3.5
+>    AgentHarness schema 反向生成 DAG JSON，含每节点 model / provider / system_prompt /
+>    tools / skills 自行决定
+> 3. 输出经 `dag_loader.parse_dag` 严格校验；不合规把错误信息回灌给 LLM 重试 ≤2 次
+> 4. 通过校验后直接 `instantiate_dag` + `scheduler.run_task` 跑
+>
+> 给 Planner 的能力清单（system prompt 注入）：
+> - 可选 providers：`anthropic` / `openai` / `deepseek` / `openrouter` / `ollama`
+> - 5 个内置 tools：read_file / write_file / exec_command / run_code / web_search
+> - `skills/` 目录下已有的技能（运行时自动扫）
+>
+> 工程量估计 4-6h；schema 不变（§3.5 AgentHarness 已能容纳生成结果）。
+> 未实施前用户走「手写 DAG → run-task」流程。
+
 ---
 
 ## 10. 技术栈（**v4 §9 更新**）
@@ -555,6 +598,7 @@ dependencies = [
     "fastapi>=0.110",               # 仪表盘 API
     "uvicorn>=0.27",                # ASGI server
     "e2b>=2.0",                     # E2B 云沙箱 SDK
+    "python-dotenv>=1.0",           # orchestrator.main 启动时自动加载 .env
     # httpx 通过 fastapi/anthropic 传入，OpenAI 兼容 client 用它直调
 ]
 
@@ -580,7 +624,7 @@ DAG JSON 不依赖任何 schema 库（手写校验，避免 jsonschema 重型依
 只读，走 `state_store` 不直连 sqlite3（v4 §10.2 硬约束）：
 
 - `GET /healthz` → `{ok, db}`
-- `GET /api/tasks` → 任务列表，按 `created_at desc`
+- `GET /api/tasks` → `state_store.list_tasks()` 按 `created_at desc`
 - `GET /api/dag-status?task_id=...` → `{task: TaskRow, nodes: [DagNode + harness]}`
 
 每个节点返回字段：`id / name / status / deps / failure_policy / retry_count /
@@ -599,6 +643,8 @@ harness`（含完整子字段）。
 - 中央：DAG 图，**Cytoscape.js + dagre 自动布局**（节点拓扑随 task 动态变）
   - 节点 1.5s 轮询；拓扑无变化时只更新状态色，拓扑变了整图重建
   - 颜色编码：pending=灰 / running=蓝 / done=绿 / failed=红 / skipped=灰虚线
+  - 边：上游节点 `status=done` 时 `edge.sourceDone=true` → 边变绿（`#3fb950`），
+    其余维持灰色（`#30363d`）
 - 右侧：节点详情卡片（点节点出现）：
   - 基本：name / id / status / policy / retry / memory_level
   - **Harness · 模型**：model chip + provider chip
@@ -727,12 +773,33 @@ multi_agent/
 - **重试前清 pending**：v4 §5.2 提了"先按 §6.3 清理"但 recovery 类 1/3 在重试时
   状态没切换都不命中；v5 在 `FailureHandler` 内手动 `list_pending_for_node + delete`
 
+ABC 段交付后的二次发现（commit `05b5d08` + `ced8880`）：
+
+- **mock 路径漏传 force_default_client**：demo-phase{2,3,4a} 三处 Scheduler 构造
+  漏给 mock 模式开 `force_default_client=True`，当 DAG 节点 harness 含非默认
+  provider（如 `deepseek`）时会真去要 API key。统一补
+- **sandbox handle 早期错误泄漏**：`_execute_node` 的 try-finally 边界曾过窄，
+  sandbox.create 之后到 HeartbeatTask 之前的代码任何路径抛错都会跳过 finally；
+  扩 try 块覆盖整段，mcp_clients 在 try 前预声明给 finally 用
+- **api.py 直连 sqlite3**：违反 §11.1 自身约束。`state_store` 补
+  `async list_tasks() -> list[TaskRow]`，`api.py` 改调
+- **stale_running 时间戳精度**：cutoff 用 seconds、心跳用 milliseconds 字符串
+  比较亚秒抖动；统一改 milliseconds
+- **dashboard edge 上游 done 变绿**：原 `edge[?targetDone]` 数据从未赋值，规则
+  永不命中；改为 `edge[?sourceDone]`，render + updateStatuses 时按上游 status==done
+  设值，§11.2 颜色编码描述对得上
+- **`.env` 自动加载**：`orchestrator/main.py` 启动时 `_load_dotenv_if_present`
+  读项目根 `.env`（`override=False`，shell export 优先），不再要求用户
+  `set -a; source .env`
+
 ### 14.4 新增哲学
 
 - **节点级 Harness 配置**：每个节点是独立"装备完整"的运行体，不再共享 hardcoded
   `claude-sonnet-4-6` + 默认 system
 - **多 provider 自由**：DeepSeek / OpenRouter / Ollama 任选；不要走 Claude Code
-  OAuth 复用订阅的歪路（违反 ToS）
+  OAuth 复用订阅的歪路（违反 ToS）。**默认推荐 DeepSeek 主用 + OpenRouter 备选**
+- **Agent 设计 DAG**：长期方向是 Planner Agent（§9.7）自动从自然语言目标生成
+  完整 harness 的 DAG JSON，让"模型/工具/技能"的选择本身也成为 LLM 的决策
 - **Sandbox 内 / 外的边界**：5 个内置工具走 sandbox（隔离），MCP server 走主机
   （长连接 + 协议要求）—— 这是 spec v4 §7.2 没明示的取舍
 
@@ -774,6 +841,8 @@ v4 §13 大部分还有效，v5 补几条：
 | R-5.3 | chromadb 0.4.15 锁定 | 不能用新版功能 | 换 0.5.x 是迁移工程；现状够用 |
 | R-5.4 | E2B 按用量计费 | 失控烧钱 | 默认 local；重要 demo 才切 e2b；监控 dashboard.usage |
 | R-5.5 | tool_loop max_turns=10 是经验值 | 复杂任务可能不够 | 节点级 harness 留口扩展（暂未暴露到 schema） |
+| R-5.6 | `LLM_PROVIDER` 代码 fallback 与 `.env.example` 默认不一致（前者 anthropic，后者 deepseek） | CI / 无 `.env` 环境跑到 anthropic 分支 | 故意保留：CI 全 mock 不真打外网无影响；开发期复制 `.env.example` 后落到 deepseek |
+| R-5.7 | DAG JSON 手写门槛 | 新场景需要人工设计节点拆分 + harness | 长期 §9.7 Planner Agent；短期复制 `dags/research_report.json` 改 |
 
 ---
 

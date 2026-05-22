@@ -8,6 +8,8 @@ dependencies = [
     "sentence-transformers>=2.2.2",
     "anthropic>=0.39.0",
     "tiktoken>=0.7.0",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
 ]
 
 [project.optional-dependencies]

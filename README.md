@@ -31,6 +31,13 @@
   - memory_store 加 collection 缓存 + lock（修并发 Chroma `get_or_create` 竞态）
   - demo-phase4a：跑 spec §5.4 完整 DAG（3 并发 research → 2 writing → summarize，含 fail_skip / fail_retry / fail_fast 三种 policy）
 
+- **阶段 5（运行时仪表盘）**：✅ 完成
+  - `dag_nodes` 表扩两列 `model_name` / `tools`（ALTER TABLE 兼容迁移）；DAG JSON 节点可声明 `"model"` / `"tools"`，scheduler 用节点 `model_name` 实例化 Agent
+  - `orchestrator/api.py`：FastAPI 只读 API，`/api/tasks` + `/api/dag-status?task_id=`，走 `state_store` 不直连 sqlite3（spec §10.2）
+  - `dashboard/index.html`：Cytoscape.js + dagre 自动布局；每 1.5s 轮询；侧栏任务列表，右侧节点详情卡片（model chip / tools chips / 时间戳 / input_memory_ids）；状态色 + dashed 边框区分 skipped
+  - CLI `dashboard-serve --port 8000`：uvicorn 起 FastAPI + 托管 dashboard
+  - 测试：146 个 case 全过（19s）
+
 - **阶段 4c（context_packer 完整版 + 接力点 + token budget）**：✅ 完成
   - `orchestrator/context_packer.py` 完整版：
     - 四个来源齐全：task.title / 接力原文 / `input_memory_ids` 精确产出 / **语义补充检索（新增）**
@@ -71,6 +78,11 @@ python -m orchestrator.main run-task --dag dags/research_report.json \
 # 真实 Claude API
 export ANTHROPIC_API_KEY=...
 python -m orchestrator.main demo-phase4a --reset
+
+# 阶段 5 仪表盘（先跑 run-task 落数据，再起服务，浏览器开 http://127.0.0.1:8000）
+python -m orchestrator.main run-task --dag dags/research_report.json \
+    --title "演示任务" --mock --reset
+python -m orchestrator.main dashboard-serve
 
 # 召回质量基线 / 飘移对比
 python -m orchestrator.main recall-baseline       # 1.11 基线（query 直接搜）

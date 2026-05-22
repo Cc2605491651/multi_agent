@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>multi_agent · 运行时仪表盘</title>
+<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<style>
+  :root{
+    --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --line:#30363d;
+    --card:#161b22; --accent:#2f81f7;
+    --wait:#30363d; --wait-text:#8b949e;
+    --run:#1f6feb;
+    --done:#238636; --done-edge:#3fb950;
+    --fail:#da3633; --skip:#8b949e;
+    --chip-bg:#21262d; --chip-fg:#c9d1d9;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:13px}
+  .layout{display:grid;grid-template-columns:280px 1fr 360px;height:100vh}
+  aside,.right{background:var(--card);border-right:1px solid var(--line);overflow:auto}
+  .right{border-right:none;border-left:1px solid var(--line)}
+  header{padding:14px 16px;border-bottom:1px solid var(--line);font-weight:600;font-size:14px}
+  .task-list{padding:6px 0}
+  .task-item{padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .task-item:hover{background:#1c2129}
+  .task-item.active{background:#1f2937;border-left:3px solid var(--accent);padding-left:13px}
+  .task-title{font-weight:500;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .task-meta{color:var(--muted);font-size:11px}
+  .status-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600}
+  .status-pill.pending{background:var(--wait);color:var(--wait-text)}
+  .status-pill.running{background:var(--run);color:#fff}
+  .status-pill.done{background:var(--done);color:#fff}
+  .status-pill.failed{background:var(--fail);color:#fff}
+  .status-pill.skipped{background:var(--skip);color:#fff}
+
+  #graph{height:100%;background:radial-gradient(#1a1f25 1px,transparent 1px) 0 0 / 22px 22px;}
+  .topbar{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0d1117}
+  .topbar h2{margin:0;font-size:14px;font-weight:600}
+  .topbar .meta{color:var(--muted)}
+  .topbar .poll{margin-left:auto;color:var(--muted);font-size:11px}
+  .topbar .poll .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3fb950;margin-right:6px;animation:pulse 1.5s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .stage{height:calc(100% - 48px);position:relative}
+
+  .right .empty{padding:40px 20px;color:var(--muted);text-align:center}
+  .right header{display:flex;align-items:center;justify-content:space-between}
+  .panel{padding:14px 18px;border-bottom:1px solid var(--line)}
+  .panel h3{margin:0 0 8px 0;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}
+  .row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px}
+  .row .k{color:var(--muted)}
+  .row .v{color:var(--fg);font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+  .chip{display:inline-block;background:var(--chip-bg);color:var(--chip-fg);
+    padding:3px 8px;border-radius:5px;font-size:11px;margin:2px 4px 2px 0;font-family:ui-monospace,Menlo,monospace}
+  .chip.model{background:#0d419d;color:#e6edf3}
+  .chip.tool{background:#1f2937;color:#9ecbff}
+  .legend{display:flex;gap:8px;padding:10px 18px;border-top:1px solid var(--line);background:#0d1117}
+  .legend .l{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+  .legend .swatch{width:12px;height:12px;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <header>任务列表</header>
+    <div id="task-list" class="task-list"></div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <h2 id="task-title">未选择任务</h2>
+      <span class="meta" id="task-meta"></span>
+      <span class="poll"><span class="dot"></span><span id="poll-text">轮询中…</span></span>
+    </div>
+    <div class="stage">
+      <div id="graph"></div>
+    </div>
+    <div class="legend">
+      <span class="l"><span class="swatch" style="background:var(--wait)"></span>pending</span>
+      <span class="l"><span class="swatch" style="background:var(--run)"></span>running</span>
+      <span class="l"><span class="swatch" style="background:var(--done)"></span>done</span>
+      <span class="l"><span class="swatch" style="background:var(--fail)"></span>failed</span>
+      <span class="l"><span class="swatch" style="background:var(--skip)"></span>skipped</span>
+    </div>
+  </main>
+
+  <section class="right">
+    <header>节点详情</header>
+    <div id="node-detail"><div class="empty">点击图中节点查看详情</div></div>
+  </section>
+</div>
+
+<script>
+const POLL_MS = 1500;
+
+let currentTaskId = null;
+let cy = null;
+let lastStatusHash = {};
+
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} → ${r.status}`);
+  return await r.json();
+}
+
+async function refreshTaskList() {
+  try {
+    const tasks = await fetchJSON('/api/tasks');
+    const list = document.getElementById('task-list');
+    list.innerHTML = '';
+    tasks.forEach(t => {
+      const div = document.createElement('div');
+      div.className = 'task-item' + (t.id === currentTaskId ? ' active' : '');
+      div.innerHTML = `
+        <div class="task-title">${escapeHtml(t.title)}</div>
+        <div class="task-meta">
+          <span class="status-pill ${t.status}">${t.status}</span>
+          ${escapeHtml(t.dag_id)} · ${formatDate(t.created_at)}
+        </div>`;
+      div.onclick = () => selectTask(t.id);
+      list.appendChild(div);
+    });
+    if (!currentTaskId && tasks.length > 0) selectTask(tasks[0].id);
+  } catch (e) {
+    console.warn('refresh task list failed', e);
+  }
+}
+
+function selectTask(tid) {
+  currentTaskId = tid;
+  lastStatusHash = {};
+  document.querySelectorAll('.task-item').forEach(el => el.classList.remove('active'));
+  document.querySelector('#node-detail').innerHTML =
+    '<div class="empty">点击图中节点查看详情</div>';
+  refreshTaskList();
+  refreshDag(true);
+}
+
+async function refreshDag(forceRebuild) {
+  if (!currentTaskId) return;
+  try {
+    const data = await fetchJSON(`/api/dag-status?task_id=${currentTaskId}`);
+    document.getElementById('task-title').textContent = data.task.title;
+    document.getElementById('task-meta').textContent =
+      ` · ${data.task.dag_id} · ${data.task.status}`;
+
+    const hashNow = nodesHash(data.nodes);
+    const sameTopology = JSON.stringify(Object.keys(hashNow).sort()) ===
+                         JSON.stringify(Object.keys(lastStatusHash).sort());
+
+    if (forceRebuild || !sameTopology || !cy) {
+      renderGraph(data.nodes);
+    } else {
+      updateStatuses(data.nodes);
+    }
+    lastStatusHash = hashNow;
+    document.getElementById('poll-text').textContent =
+      `轮询中… ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    console.warn('refresh dag failed', e);
+    document.getElementById('poll-text').textContent = `轮询失败：${e.message}`;
+  }
+}
+
+function nodesHash(nodes) {
+  const h = {};
+  nodes.forEach(n => h[n.id] = n.status + '|' + n.retry_count);
+  return h;
+}
+
+function renderGraph(nodes) {
+  const elements = [];
+  const idSet = new Set(nodes.map(n => n.id));
+  nodes.forEach(n => {
+    elements.push({
+      data: {
+        id: n.id, label: n.node_name || n.name,
+        status: n.status,
+        model: n.model_name || '',
+        tools: (n.tools || []).join(','),
+        retry: n.retry_count, policy: n.failure_policy,
+        raw: n,
+      }
+    });
+  });
+  nodes.forEach(n => {
+    (n.deps || []).forEach(dep => {
+      if (idSet.has(dep)) {
+        elements.push({ data: { id: `${dep}->${n.id}`, source: dep, target: n.id }});
+      }
+    });
+  });
+
+  if (cy) cy.destroy();
+  cy = cytoscape({
+    container: document.getElementById('graph'),
+    elements,
+    style: [
+      { selector: 'node', style: {
+        'shape': 'round-rectangle',
+        'width': 180, 'height': 64,
+        'background-color': 'data(statusColor)',
+        'border-width': 2, 'border-color': '#30363d',
+        'label': 'data(label)',
+        'color': '#e6edf3', 'text-valign': 'center', 'text-halign': 'center',
+        'font-size': 13, 'font-weight': 600,
+        'text-wrap': 'wrap', 'text-max-width': 160,
+      }},
+      { selector: 'node[status = "pending"]', style: { 'background-color': '#30363d', 'color': '#8b949e' }},
+      { selector: 'node[status = "running"]', style: { 'background-color': '#1f6feb', 'border-color': '#79c0ff' }},
+      { selector: 'node[status = "done"]',    style: { 'background-color': '#238636', 'border-color': '#3fb950' }},
+      { selector: 'node[status = "failed"]',  style: { 'background-color': '#da3633', 'border-color': '#ff7b72' }},
+      { selector: 'node[status = "skipped"]', style: { 'background-color': '#484f58', 'color': '#c9d1d9', 'border-style': 'dashed' }},
+      { selector: 'edge', style: {
+        'curve-style': 'bezier',
+        'target-arrow-shape': 'triangle',
+        'line-color': '#30363d', 'target-arrow-color': '#30363d',
+        'width': 2,
+      }},
+      { selector: 'edge[?targetDone]', style: { 'line-color': '#3fb950', 'target-arrow-color': '#3fb950' }},
+    ],
+    layout: {
+      name: 'dagre', rankDir: 'LR',
+      nodeSep: 40, rankSep: 80, edgeSep: 20,
+    },
+    minZoom: 0.3, maxZoom: 2.0,
+  });
+
+  cy.on('tap', 'node', (evt) => showNodeDetail(evt.target.data('raw')));
+}
+
+function updateStatuses(nodes) {
+  if (!cy) return;
+  nodes.forEach(n => {
+    const node = cy.getElementById(n.id);
+    if (node) {
+      node.data('status', n.status);
+      node.data('retry', n.retry_count);
+      node.data('raw', n);
+    }
+  });
+}
+
+function showNodeDetail(n) {
+  const tools = (n.tools || []).map(t => `<span class="chip tool">${escapeHtml(t)}</span>`).join('') || '<span class="row">（无）</span>';
+  const model = n.model_name
+    ? `<span class="chip model">${escapeHtml(n.model_name)}</span>`
+    : '<span class="row">（默认）</span>';
+  const input_mids = (n.input_memory_ids || []).map(
+    m => m ? `<div class="chip">${escapeHtml(m)}</div>` : '<div class="chip" style="background:#3d2c2c">null（上游跳过）</div>'
+  ).join('') || '<span class="row">（无）</span>';
+  document.getElementById('node-detail').innerHTML = `
+    <div class="panel">
+      <h3>节点</h3>
+      <div class="row"><span class="k">name</span><span class="v">${escapeHtml(n.name)}</span></div>
+      <div class="row"><span class="k">id</span><span class="v">${escapeHtml(n.id)}</span></div>
+      <div class="row"><span class="k">status</span><span class="v"><span class="status-pill ${n.status}">${n.status}</span></span></div>
+      <div class="row"><span class="k">policy</span><span class="v">${escapeHtml(n.failure_policy)}</span></div>
+      <div class="row"><span class="k">retry</span><span class="v">${n.retry_count} / ${n.max_retries}</span></div>
+      <div class="row"><span class="k">memory_level</span><span class="v">${escapeHtml(n.memory_level)}</span></div>
+    </div>
+    <div class="panel">
+      <h3>模型</h3>
+      ${model}
+    </div>
+    <div class="panel">
+      <h3>工具</h3>
+      ${tools}
+    </div>
+    <div class="panel">
+      <h3>运行时</h3>
+      <div class="row"><span class="k">worker_id</span><span class="v">${escapeHtml(n.worker_id || '—')}</span></div>
+      <div class="row"><span class="k">heartbeat_at</span><span class="v">${escapeHtml(n.heartbeat_at || '—')}</span></div>
+      <div class="row"><span class="k">started_at</span><span class="v">${escapeHtml(n.started_at || '—')}</span></div>
+      <div class="row"><span class="k">finished_at</span><span class="v">${escapeHtml(n.finished_at || '—')}</span></div>
+    </div>
+    <div class="panel">
+      <h3>input_memory_ids（精确接力）</h3>
+      ${input_mids}
+    </div>
+    <div class="panel">
+      <h3>output_memory_id</h3>
+      <div class="row"><span class="v">${escapeHtml(n.output_memory_id || '—')}</span></div>
+    </div>
+  `;
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+function formatDate(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString(); } catch { return iso; }
+}
+
+// 初始 + 轮询
+refreshTaskList();
+setInterval(refreshTaskList, 5000);
+setInterval(() => refreshDag(false), POLL_MS);
+</script>
+</body>
+</html>

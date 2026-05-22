@@ -1012,6 +1012,24 @@ async def run_recall_baseline_v2(*, k: int = 5) -> int:
     return 0
 
 
+# ============ 阶段 5 dashboard-serve ============
+
+
+def run_dashboard_serve(*, host: str, port: int) -> int:
+    import uvicorn
+
+    from orchestrator.api import create_app
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    app = create_app(STATE_DB)
+    print(
+        f"[dashboard] serving on http://{host}:{port}  (state_db={STATE_DB})\n"
+        f"[dashboard] 任务列表 + DAG 状态实时可视化（spec §10）"
+    )
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
+
+
 # ============ CLI 入口 ============
 
 
@@ -1068,6 +1086,12 @@ def main() -> int:
     )
     p_recall_v2.add_argument("-k", type=int, default=5)
 
+    p_dash = sub.add_parser(
+        "dashboard-serve", help="阶段 5：启动运行时仪表盘（spec §10）"
+    )
+    p_dash.add_argument("--host", default="127.0.0.1")
+    p_dash.add_argument("--port", type=int, default=8000)
+
     p_drift = sub.add_parser(
         "recall-drift", help="阶段 3 任务 3.6 对比实验：id 取 vs 语义召回飘移"
     )
@@ -1115,6 +1139,8 @@ def main() -> int:
         return asyncio.run(run_recall_baseline_v2(k=args.k))
     if args.cmd == "recall-drift":
         return asyncio.run(run_recall_drift(k=args.k))
+    if args.cmd == "dashboard-serve":
+        return run_dashboard_serve(host=args.host, port=args.port)
     return 1
 
 

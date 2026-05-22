@@ -139,3 +139,84 @@ async def test_instantiate_preserves_max_retries(tmp_path: Path) -> None:
     nid = mapping["n1"]
     n = await state.get_dag_node(nid)
     assert n.max_retries == 5
+
+
+# ---- 阶段 5 新字段：model + tools ----
+
+
+def test_parse_model_and_tools() -> None:
+    d = parse_dag(
+        {
+            "dag_id": "x",
+            "nodes": [
+                {
+                    "id": "n1", "name": "a", "deps": [],
+                    "model": "claude-opus-4-7",
+                    "tools": ["web_search", "read_file"],
+                },
+            ],
+        }
+    )
+    assert d.nodes[0].model_name == "claude-opus-4-7"
+    assert d.nodes[0].tools == ["web_search", "read_file"]
+
+
+def test_parse_defaults_when_omitted() -> None:
+    d = parse_dag({"dag_id": "x", "nodes": [{"id": "n1", "name": "a", "deps": []}]})
+    assert d.nodes[0].model_name is None
+    assert d.nodes[0].tools == []
+
+
+@pytest.mark.parametrize(
+    "patch,err",
+    [
+        ({"nodes": [{"id": "n1", "name": "a", "deps": [], "model": ""}]}, "model"),
+        ({"nodes": [{"id": "n1", "name": "a", "deps": [], "tools": "not-a-list"}]}, "tools"),
+        ({"nodes": [{"id": "n1", "name": "a", "deps": [], "tools": [123]}]}, "tools"),
+        ({"nodes": [{"id": "n1", "name": "a", "deps": [], "tools": [""]}]}, "tools"),
+    ],
+)
+def test_parse_invalid_model_or_tools(patch: dict, err: str) -> None:
+    raw = _base()
+    raw.update(patch)
+    with pytest.raises(ValueError, match=err):
+        parse_dag(raw)
+
+
+async def test_instantiate_writes_model_and_tools(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "state.db")
+    d = parse_dag(
+        {
+            "dag_id": "x",
+            "nodes": [
+                {
+                    "id": "n1", "name": "research", "deps": [],
+                    "model": "claude-haiku-4-5",
+                    "tools": ["web_search"],
+                },
+                {
+                    "id": "n2", "name": "writing", "deps": ["n1"],
+                    "model": "claude-sonnet-4-6",
+                },
+            ],
+        }
+    )
+    _, mapping = await instantiate_dag(state, d, user_id="u", title="t")
+    r = await state.get_dag_node(mapping["n1"])
+    w = await state.get_dag_node(mapping["n2"])
+    assert r.model_name == "claude-haiku-4-5"
+    assert r.tools == ["web_search"]
+    assert w.model_name == "claude-sonnet-4-6"
+    assert w.tools == []
+
+
+async def test_loaded_5_4_dag_has_per_node_models(tmp_path: Path) -> None:
+    """阶段 5 起 dags/research_report.json 每节点都标注 model + tools。"""
+    state = StateStore(tmp_path / "state.db")
+    path = Path(__file__).resolve().parent.parent / "dags" / "research_report.json"
+    d = load_dag(path)
+    _, mapping = await instantiate_dag(state, d, user_id="u", title="t")
+    summarize = await state.get_dag_node(mapping["n6"])
+    assert summarize.model_name == "claude-opus-4-7"
+    assert summarize.memory_level == "task_conclusion"
+    assert "write_file" in summarize.tools

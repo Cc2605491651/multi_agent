@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+
 from pathlib import Path
 
 from storage.state_store import (
@@ -37,6 +38,8 @@ class DagNodeDef:
     failure_policy: str = "fail_retry"
     max_retries: int = 2
     memory_level: str = "node_output"
+    model_name: str | None = None
+    tools: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,20 @@ def _parse_dag(raw: dict) -> DagDef:
                 f"must be one of {sorted(VALID_MEMORY_LEVEL)}"
             )
 
+        model_name = n.get("model")
+        if model_name is not None and (
+            not isinstance(model_name, str) or not model_name
+        ):
+            raise ValueError(f"node {nid}: model must be a non-empty string if set")
+
+        tools = n.get("tools", [])
+        if not isinstance(tools, list) or not all(
+            isinstance(t, str) and t for t in tools
+        ):
+            raise ValueError(
+                f"node {nid}: tools must be a list of non-empty strings"
+            )
+
         parsed_nodes.append(
             DagNodeDef(
                 id=nid,
@@ -118,6 +135,8 @@ def _parse_dag(raw: dict) -> DagDef:
                 failure_policy=policy,
                 max_retries=max_retries,
                 memory_level=memory_level,
+                model_name=model_name,
+                tools=list(tools),
             )
         )
 
@@ -190,6 +209,8 @@ async def instantiate_dag(
             failure_policy=n.failure_policy,
             max_retries=n.max_retries,
             memory_level=n.memory_level,
+            model_name=n.model_name,
+            tools=n.tools,
         )
         mapping[n.id] = nid
     return task_id, mapping

@@ -270,7 +270,10 @@ class Scheduler:
         handle = await self._sandbox.create(context_package=packed.text)
         active_handles[node.id] = handle
 
-        agent = Agent(agent_id=node.node_name, client=self._llm)
+        agent_kwargs: dict = {"agent_id": node.node_name, "client": self._llm}
+        if node.model_name:
+            agent_kwargs["chat_model"] = node.model_name
+        agent = Agent(**agent_kwargs)
         try:
             async with HeartbeatTask(
                 self._state_store, node.id, interval=self._heartbeat_interval

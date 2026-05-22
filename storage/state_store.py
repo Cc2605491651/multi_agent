@@ -16,7 +16,7 @@ import asyncio
 import json
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     started_at        TEXT,
     finished_at       TEXT,
     memory_level      TEXT NOT NULL DEFAULT 'node_output',
+    model_name        TEXT,
+    tools             TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_task   ON dag_nodes(task_id);
@@ -89,6 +91,8 @@ class DagNodeRow:
     started_at: str | None
     finished_at: str | None
     memory_level: str = "node_output"
+    model_name: str | None = None
+    tools: list[str] = field(default_factory=list)
 
 
 def _utcnow() -> str:
@@ -138,6 +142,8 @@ def _row_to_node(row: sqlite3.Row) -> DagNodeRow:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         memory_level=row["memory_level"] if "memory_level" in cols else "node_output",
+        model_name=row["model_name"] if "model_name" in cols else None,
+        tools=_parse_json_list(row["tools"]) if "tools" in cols else [],
     )
 
 
@@ -185,6 +191,8 @@ class StateStore:
         failure_policy: str = "fail_retry",
         max_retries: int = 2,
         memory_level: str = "node_output",
+        model_name: str | None = None,
+        tools: list[str] | None = None,
         node_id: str | None = None,
     ) -> str:
         if failure_policy not in VALID_FAILURE_POLICY:
@@ -199,6 +207,8 @@ class StateStore:
             failure_policy,
             max_retries,
             memory_level,
+            model_name,
+            list(tools) if tools else [],
             node_id,
         )
 
@@ -280,13 +290,17 @@ class StateStore:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
-            # 兼容性迁移：旧 DB 没 memory_level 列
             cols = {row[1] for row in conn.execute("PRAGMA table_info(dag_nodes)")}
+            # 兼容性迁移：旧 DB 缺列
             if "memory_level" not in cols:
                 conn.execute(
                     "ALTER TABLE dag_nodes ADD COLUMN memory_level "
                     "TEXT NOT NULL DEFAULT 'node_output'"
                 )
+            if "model_name" not in cols:
+                conn.execute("ALTER TABLE dag_nodes ADD COLUMN model_name TEXT")
+            if "tools" not in cols:
+                conn.execute("ALTER TABLE dag_nodes ADD COLUMN tools TEXT")
 
     def _create_task_sync(
         self,
@@ -340,6 +354,8 @@ class StateStore:
         failure_policy: str,
         max_retries: int,
         memory_level: str,
+        model_name: str | None,
+        tools: list[str],
         node_id: str | None,
     ) -> str:
         nid = node_id or f"node_{uuid.uuid4().hex[:12]}"
@@ -349,8 +365,9 @@ class StateStore:
                 INSERT INTO dag_nodes
                     (id, task_id, node_name, depends_on, status,
                      failure_policy, retry_count, max_retries,
-                     input_memory_ids, memory_level)
-                VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, '[]', ?)
+                     input_memory_ids, memory_level,
+                     model_name, tools)
+                VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, '[]', ?, ?, ?)
                 """,
                 (
                     nid,
@@ -360,6 +377,8 @@ class StateStore:
                     failure_policy,
                     max_retries,
                     memory_level,
+                    model_name,
+                    json.dumps(tools) if tools else None,
                 ),
             )
         return nid

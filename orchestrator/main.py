@@ -771,6 +771,247 @@ async def run_demo_phase4a(*, mock: bool, reset: bool, fail_b: bool) -> int:
     return 0 if final == "done" else 1
 
 
+# ============ 通用 run-task（接力点参数化，spec §11 阶段 4c 任务 4c.3）============
+
+
+def _generic_sub_task(node, ctx) -> str:
+    return f"[node:{node.node_name}] 完成 「{ctx.title}」 的 「{node.node_name}」 子任务"
+
+
+async def run_task_cli(
+    *,
+    dag_path: str,
+    title: str,
+    handoff_conv: str | None,
+    handoff_range: tuple[int, int] | None,
+    user_id: str,
+    mock: bool,
+    reset: bool,
+    max_concurrent: int,
+) -> int:
+    if reset:
+        import shutil
+
+        for p in (TRANSCRIPT_DB, CHROMA_DIR, STATE_DB):
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                shutil.rmtree(p)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    transcript_store = TranscriptStore(TRANSCRIPT_DB)
+    memory_store = MemoryStore(CHROMA_DIR)
+    state_store = StateStore(STATE_DB)
+    sandbox = LocalBackend()
+    recovery = Recovery(state_store, memory_store, stale_seconds=300)
+    packer = ContextPacker(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+    )
+
+    if mock:
+        @dataclass
+        class _GenericMock:
+            async def complete(self, *, model, system, messages, max_tokens=1024):
+                text = messages[-1]["content"]
+                if "提炼员" in system:
+                    tag = "【Agent 输出】"
+                    if tag in text:
+                        tail = text.split(tag, 1)[1]
+                        for stop in ("\n\n请按", "\n请按", "【"):
+                            if stop in tail:
+                                tail = tail.split(stop, 1)[0]
+                                break
+                        return tail.strip()[:160]
+                    return text.strip()[:160]
+                # 回执：根据 [node:xxx] 标识返回
+                import re as _re
+
+                m = _re.search(r"\[node:(\w+)\]", text)
+                name = m.group(1) if m else "node"
+                return f"[mock 输出] 节点 {name} 完成"
+
+        client = _GenericMock()
+        print("[run-task] mock 模式")
+    else:
+        try:
+            client = default_client()
+        except RuntimeError as e:
+            print(f"[run-task] {e}", file=sys.stderr)
+            return 2
+        print("[run-task] 真实 Claude API 模式")
+
+    dag = load_dag(dag_path)
+    print(f"[run-task] DAG: {dag.dag_id} ({len(dag.nodes)} nodes)")
+
+    task_id, mapping = await instantiate_dag(
+        state_store,
+        dag,
+        user_id=user_id,
+        title=title,
+        handoff_conversation_id=handoff_conv,
+        handoff_turn_range=list(handoff_range) if handoff_range else None,
+    )
+    print(f"[run-task] task={task_id}")
+    if handoff_conv:
+        print(f"[run-task] handoff = conv={handoff_conv} range={handoff_range}")
+    for logical_id, node_id in mapping.items():
+        print(f"   {logical_id} → {node_id}")
+
+    scheduler = Scheduler(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+        sandbox=sandbox,
+        llm_client=client,
+        recovery=recovery,
+        context_packer=packer,
+        failure_handler=FailureHandler(state_store, memory_store),
+        sub_task_builder=_generic_sub_task,
+        max_concurrent_workers=max_concurrent,
+        heartbeat_interval=2.0,
+        cancel_timeout=2.0,
+    )
+    final = await scheduler.run_task(task_id)
+    print(f"\n[run-task] task 最终状态: {final}\n")
+
+    # 阶段 4c 验收：打印每个节点的 packed context token 数（不超 2K）
+    nodes = await state_store.list_dag_nodes(task_id)
+    print("每个节点的 context token 实测：")
+    for n in nodes:
+        try:
+            packed = await packer.pack(
+                task_id=task_id, node_id=n.id,
+                sub_task_description=_generic_sub_task(
+                    n, type("Ctx", (), {"task_id": task_id, "title": title, "user_id": user_id})(),
+                ),
+            )
+            print(
+                f"  - {n.node_name:14s}  status={n.status:8s}  "
+                f"tokens={packed.token_count:4d}  "
+                f"sem_added={packed.semantic_added}  sem_dropped={packed.semantic_dropped_for_budget}"
+            )
+        except Exception as e:
+            print(f"  - {n.node_name}: pack failed ({e})")
+    return 0 if final == "done" else 1
+
+
+# ============ 4c.5 召回质量 v2（context_packer 路径）============
+
+
+async def run_recall_baseline_v2(*, k: int = 5) -> int:
+    """与 1.11 同 20 条 doc + 45 query，但走 context_packer 内部的 query 构造路径
+    （title + sub_task + 上游摘要 + memory_level 排序），对比基线。"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    persist = DATA_DIR / "chroma_recall_v2"
+    if persist.exists():
+        import shutil
+
+        shutil.rmtree(persist)
+    state_db = DATA_DIR / "state_recall_v2.db"
+    if state_db.exists():
+        state_db.unlink()
+    transcript_db = DATA_DIR / "transcript_recall_v2.db"
+    if transcript_db.exists():
+        transcript_db.unlink()
+
+    memory_store = MemoryStore(persist)
+    state_store = StateStore(state_db)
+    transcript_store = TranscriptStore(transcript_db)
+    packer = ContextPacker(
+        state_store=state_store,
+        transcript_store=transcript_store,
+        memory_store=memory_store,
+    )
+
+    user_id = "recall_test_v2"
+    task_id = await state_store.create_task(
+        user_id=user_id, title="召回基线 v2", dag_id="recall_v2"
+    )
+
+    # 复用 1.11 的 20 条样本
+    doc_to_mem: dict[str, str] = {}
+    for doc, _ in _RECALL_DATASET:
+        mid = await memory_store.add(
+            user_id,
+            doc,
+            {
+                "task_id": task_id,
+                "produced_by_node": "n_seed",
+                "produced_by_agent": "seed",
+                "memory_level": "node_output",
+                "status": "active",
+            },
+        )
+        doc_to_mem[doc] = mid
+
+    queries: list[tuple[str, str]] = []
+    for doc, q_list in _RECALL_DATASET:
+        for q in q_list:
+            queries.append((q, doc_to_mem[doc]))
+
+    # 用一个独立节点做 pack，每次只让它的 sub_task 等同于 query
+    probe_node_id = await state_store.create_dag_node(
+        task_id=task_id, node_name="probe"
+    )
+    await state_store.set_node_input_memory_ids(probe_node_id, [])
+
+    hits_at_k = 0
+    mrr_sum = 0.0
+    details: list[dict] = []
+    for q, expected_mid in queries:
+        packed = await packer.pack(
+            task_id=task_id, node_id=probe_node_id,
+            sub_task_description=q,
+        )
+        # 用 packer 内部的查询路径
+        results = await memory_store.search(
+            packed.query_used, user_id, task_id, k=k,
+            cross_task=False, status="active",
+        )
+        ids = [r["id"] for r in results]
+        hit = expected_mid in ids
+        rank = ids.index(expected_mid) + 1 if hit else 0
+        if hit:
+            hits_at_k += 1
+            mrr_sum += 1.0 / rank
+        details.append(
+            {
+                "query": q, "rank": rank,
+                "query_used": packed.query_used,
+                "top1": results[0]["document"] if results else None,
+            }
+        )
+
+    n = len(queries)
+    p_at_k = hits_at_k / n
+    mrr = mrr_sum / n
+    print(f"\n=== 召回质量基线 v2（k={k}）context_packer 路径 ===")
+    print(f"样本：{len(_RECALL_DATASET)} 条记忆，{n} 条 query")
+    print(f"P@{k} = {p_at_k:.3f}   MRR = {mrr:.3f}")
+    miss = [d for d in details if d["rank"] == 0]
+    if miss:
+        print(f"未命中 {len(miss)} 条：")
+        for d in miss[:5]:
+            print(f"  - q={d['query']!r}  top1={d['top1']!r}")
+    else:
+        print("（全部命中）")
+
+    import json
+
+    out_path = DATA_DIR / "recall_baseline_v2.json"
+    out_path.write_text(
+        json.dumps(
+            {"p_at_k": p_at_k, "mrr": mrr, "k": k, "samples": n, "details": details},
+            ensure_ascii=False, indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"\n结果已写入 {out_path}")
+    return 0
+
+
 # ============ CLI 入口 ============
 
 
@@ -800,8 +1041,32 @@ def main() -> int:
         help="模拟 research_b 一直失败，演示 fail_skip 跳过 + 下游照常跑",
     )
 
+    p_run = sub.add_parser(
+        "run-task", help="跑任意 DAG JSON + 可选接力点（阶段 4c 任务 4c.3）"
+    )
+    p_run.add_argument("--dag", required=True, help="DAG JSON 路径")
+    p_run.add_argument("--title", required=True, help="任务主题")
+    p_run.add_argument("--user-id", default="default_user")
+    p_run.add_argument(
+        "--handoff-conv", default=None,
+        help="接力点 conversation_id（须事先存在于 transcript_store）",
+    )
+    p_run.add_argument(
+        "--handoff-range", default=None,
+        help="接力点 turn 范围，格式 start,end，如 1,5",
+    )
+    p_run.add_argument("--mock", action="store_true")
+    p_run.add_argument("--reset", action="store_true")
+    p_run.add_argument("--max-concurrent", type=int, default=3)
+
     p_recall = sub.add_parser("recall-baseline", help="阶段 1 任务 1.11 召回基线")
     p_recall.add_argument("-k", type=int, default=5)
+
+    p_recall_v2 = sub.add_parser(
+        "recall-baseline-v2",
+        help="阶段 4c 任务 4c.5：context_packer 路径召回质量",
+    )
+    p_recall_v2.add_argument("-k", type=int, default=5)
 
     p_drift = sub.add_parser(
         "recall-drift", help="阶段 3 任务 3.6 对比实验：id 取 vs 语义召回飘移"
@@ -821,8 +1086,33 @@ def main() -> int:
                 mock=args.mock, reset=args.reset, fail_b=args.fail_b
             )
         )
+    if args.cmd == "run-task":
+        handoff_range = None
+        if args.handoff_range:
+            parts = args.handoff_range.split(",")
+            if len(parts) != 2:
+                print(
+                    "[run-task] --handoff-range 格式应为 start,end（如 1,5）",
+                    file=sys.stderr,
+                )
+                return 2
+            handoff_range = (int(parts[0]), int(parts[1]))
+        return asyncio.run(
+            run_task_cli(
+                dag_path=args.dag,
+                title=args.title,
+                handoff_conv=args.handoff_conv,
+                handoff_range=handoff_range,
+                user_id=args.user_id,
+                mock=args.mock,
+                reset=args.reset,
+                max_concurrent=args.max_concurrent,
+            )
+        )
     if args.cmd == "recall-baseline":
         return asyncio.run(run_recall_baseline(k=args.k))
+    if args.cmd == "recall-baseline-v2":
+        return asyncio.run(run_recall_baseline_v2(k=args.k))
     if args.cmd == "recall-drift":
         return asyncio.run(run_recall_drift(k=args.k))
     return 1

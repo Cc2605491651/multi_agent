@@ -65,17 +65,19 @@ async def writeback_turn(
         agent_id=agent.agent_id,
     )
 
-    # 第 2 步：写 pending 记忆
+    # 第 2 步：写 pending 记忆。memory_level 从 dag_nodes 取（spec §8.3）。
     doc = await agent.distill(user_input, agent_output)
     pending_mem_id: Optional[str] = None
     if doc:
+        node_row = await state_store.get_dag_node(node_id)
+        memory_level = node_row.memory_level if node_row else "node_output"
         metadata = {
             "task_id": task_id,
             "source_conversation_id": conversation_id,
             "source_turn_index": turn_index,
             "produced_by_agent": agent.agent_id,
             "produced_by_node": node_id,
-            "memory_level": "node_output",
+            "memory_level": memory_level,
             "status": "pending",
         }
         pending_mem_id = await memory_store.add(user_id, doc, metadata)

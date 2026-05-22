@@ -30,7 +30,18 @@
   - `orchestrator/scheduler.py` 重写：`asyncio.Semaphore(MAX_CONCURRENT_WORKERS=5)` 并发，节点失败走 FailureHandler；`fail_fast` 调 `sandbox.cancel`，5s 超时改 `destroy` 强杀；任务级失败后 cascade `skipped` 下游
   - memory_store 加 collection 缓存 + lock（修并发 Chroma `get_or_create` 竞态）
   - demo-phase4a：跑 spec §5.4 完整 DAG（3 并发 research → 2 writing → summarize，含 fail_skip / fail_retry / fail_fast 三种 policy）
-  - 测试：129 个 case 全过（19s）
+
+- **阶段 4c（context_packer 完整版 + 接力点 + token budget）**：✅ 完成
+  - `orchestrator/context_packer.py` 完整版：
+    - 四个来源齐全：task.title / 接力原文 / `input_memory_ids` 精确产出 / **语义补充检索（新增）**
+    - spec §8.2 query 构造：`title + sub_task + 上游摘要(≤50字)`，总长 ≤ 200 token，超长按 30/20/0 阶梯截断
+    - spec §8.2 token budget：默认 2K token；超出按相关度从低到高裁语义补充；底线保留 `task.title + 子任务`，必要时硬截接力原文
+    - spec §8.3 memory_level 排序：语义检索时 `task_conclusion` 优先于 `node_output`
+  - `state_store` + `dag_loader` 加 `memory_level` 字段（兼容性 ALTER 迁移）
+  - CLI `run-task --dag --title --handoff-conv --handoff-range`：通用 DAG 入口 + 接力点参数化（spec §11 阶段 4c 任务 4c.3）
+  - **token budget 实测**（run-task 跑 spec §5.4 6 节点 DAG）：所有节点 context 在 137-200 token 之间，远低于 2K 上限
+  - **召回基线 v2**（`recall-baseline-v2`）：P@5 = 0.978 / MRR = 0.828；vs v1 的 1.00 / 0.90 略降，是 spec §8.2 把 `title` 拼进 query 的预期 trade-off（真实多 agent 场景需要 title 解决「子任务描述太短」的召回噪音）
+  - 测试：133 个 case 全过（19s）
 
 ## 运行
 
@@ -51,13 +62,20 @@ python -m orchestrator.main demo-phase3 --mock --reset
 python -m orchestrator.main demo-phase4a --mock --reset
 python -m orchestrator.main demo-phase4a --mock --reset --fail-b  # 演示 fail_skip
 
+# 阶段 4c 通用 DAG 入口（含接力点）
+python -m orchestrator.main run-task --dag dags/research_report.json \
+    --title "选型决策任务" --mock --reset
+python -m orchestrator.main run-task --dag dags/research_report.json \
+    --title "..." --handoff-conv conv_abc --handoff-range 1,5 --mock
+
 # 真实 Claude API
 export ANTHROPIC_API_KEY=...
 python -m orchestrator.main demo-phase4a --reset
 
 # 召回质量基线 / 飘移对比
-python -m orchestrator.main recall-baseline
-python -m orchestrator.main recall-drift
+python -m orchestrator.main recall-baseline       # 1.11 基线（query 直接搜）
+python -m orchestrator.main recall-baseline-v2    # 4c.5 packer 路径
+python -m orchestrator.main recall-drift          # 3.6 id vs 语义对比
 
 # 测试
 pytest -v

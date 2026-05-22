@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     heartbeat_at      TEXT,
     started_at        TEXT,
     finished_at       TEXT,
+    memory_level      TEXT NOT NULL DEFAULT 'node_output',
     FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_task   ON dag_nodes(task_id);
@@ -56,6 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_dag_nodes_status ON dag_nodes(status);
 VALID_TASK_STATUS = {"pending", "running", "done", "failed"}
 VALID_NODE_STATUS = {"pending", "running", "done", "failed", "skipped"}
 VALID_FAILURE_POLICY = {"fail_retry", "fail_skip", "fail_fast"}
+VALID_MEMORY_LEVEL = {"node_output", "task_conclusion"}
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,7 @@ class DagNodeRow:
     heartbeat_at: str | None
     started_at: str | None
     finished_at: str | None
+    memory_level: str = "node_output"
 
 
 def _utcnow() -> str:
@@ -118,6 +121,7 @@ def _row_to_task(row: sqlite3.Row) -> TaskRow:
 
 
 def _row_to_node(row: sqlite3.Row) -> DagNodeRow:
+    cols = row.keys()
     return DagNodeRow(
         id=row["id"],
         task_id=row["task_id"],
@@ -133,6 +137,7 @@ def _row_to_node(row: sqlite3.Row) -> DagNodeRow:
         heartbeat_at=row["heartbeat_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        memory_level=row["memory_level"] if "memory_level" in cols else "node_output",
     )
 
 
@@ -179,10 +184,13 @@ class StateStore:
         depends_on: list[str] | None = None,
         failure_policy: str = "fail_retry",
         max_retries: int = 2,
+        memory_level: str = "node_output",
         node_id: str | None = None,
     ) -> str:
         if failure_policy not in VALID_FAILURE_POLICY:
             raise ValueError(f"invalid failure_policy: {failure_policy}")
+        if memory_level not in VALID_MEMORY_LEVEL:
+            raise ValueError(f"invalid memory_level: {memory_level}")
         return await asyncio.to_thread(
             self._create_dag_node_sync,
             task_id,
@@ -190,6 +198,7 @@ class StateStore:
             depends_on or [],
             failure_policy,
             max_retries,
+            memory_level,
             node_id,
         )
 
@@ -271,6 +280,13 @@ class StateStore:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # 兼容性迁移：旧 DB 没 memory_level 列
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(dag_nodes)")}
+            if "memory_level" not in cols:
+                conn.execute(
+                    "ALTER TABLE dag_nodes ADD COLUMN memory_level "
+                    "TEXT NOT NULL DEFAULT 'node_output'"
+                )
 
     def _create_task_sync(
         self,
@@ -323,6 +339,7 @@ class StateStore:
         depends_on: list[str],
         failure_policy: str,
         max_retries: int,
+        memory_level: str,
         node_id: str | None,
     ) -> str:
         nid = node_id or f"node_{uuid.uuid4().hex[:12]}"
@@ -332,8 +349,8 @@ class StateStore:
                 INSERT INTO dag_nodes
                     (id, task_id, node_name, depends_on, status,
                      failure_policy, retry_count, max_retries,
-                     input_memory_ids)
-                VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, '[]')
+                     input_memory_ids, memory_level)
+                VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, '[]', ?)
                 """,
                 (
                     nid,
@@ -342,6 +359,7 @@ class StateStore:
                     json.dumps(depends_on),
                     failure_policy,
                     max_retries,
+                    memory_level,
                 ),
             )
         return nid

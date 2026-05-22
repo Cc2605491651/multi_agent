@@ -22,7 +22,11 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from storage.state_store import StateStore, VALID_FAILURE_POLICY
+from storage.state_store import (
+    StateStore,
+    VALID_FAILURE_POLICY,
+    VALID_MEMORY_LEVEL,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,7 @@ class DagNodeDef:
     deps: list[str]
     failure_policy: str = "fail_retry"
     max_retries: int = 2
+    memory_level: str = "node_output"
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,13 @@ def _parse_dag(raw: dict) -> DagDef:
                 f"node {nid}: max_retries must be a non-negative int"
             )
 
+        memory_level = n.get("memory_level", "node_output")
+        if memory_level not in VALID_MEMORY_LEVEL:
+            raise ValueError(
+                f"node {nid}: invalid memory_level={memory_level!r}, "
+                f"must be one of {sorted(VALID_MEMORY_LEVEL)}"
+            )
+
         parsed_nodes.append(
             DagNodeDef(
                 id=nid,
@@ -105,6 +117,7 @@ def _parse_dag(raw: dict) -> DagDef:
                 deps=list(deps),
                 failure_policy=policy,
                 max_retries=max_retries,
+                memory_level=memory_level,
             )
         )
 
@@ -176,6 +189,7 @@ async def instantiate_dag(
             depends_on=depends_on,
             failure_policy=n.failure_policy,
             max_retries=n.max_retries,
+            memory_level=n.memory_level,
         )
         mapping[n.id] = nid
     return task_id, mapping

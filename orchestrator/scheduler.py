@@ -32,7 +32,10 @@ from worker.agent import Agent, LLMClient
 from worker.harness import AgentHarness
 from worker.heartbeat import HeartbeatTask
 from worker.llm_clients import make_llm_client
+from worker.mcp_client import close_all as mcp_close_all
+from worker.mcp_client import connect_all as mcp_connect_all
 from worker.sandbox import SandboxBackend, SandboxHandle
+from worker.skills import SkillLoader
 from worker.tools import ToolRegistry
 from worker.writeback import writeback_turn
 
@@ -80,6 +83,7 @@ class Scheduler:
         cancel_timeout: float = CANCEL_TIMEOUT_SECONDS,
         default_provider: str | None = None,
         force_default_client: bool = False,
+        skill_loader: SkillLoader | None = None,
     ) -> None:
         self._state_store = state_store
         self._transcript_store = transcript_store
@@ -102,6 +106,8 @@ class Scheduler:
         self._force_default = force_default_client
         # 节点级 provider 切换时的 client 缓存
         self._provider_client_cache: dict[str, LLMClient] = {}
+        # 阶段 C：skill 加载器（指令包注入）
+        self._skill_loader = skill_loader or SkillLoader()
 
     async def run_task(self, task_id: str) -> str:
         await self._recovery.sweep_all()
@@ -285,21 +291,34 @@ class Scheduler:
         handle = await self._sandbox.create(context_package=packed.text)
         active_handles[node.id] = handle
 
-        # 解析节点 harness：覆盖 provider / model / system_prompt
+        # 解析节点 harness：覆盖 provider / model / system_prompt + skills + mcp
         harness = AgentHarness.from_dict(node.harness_json) if node.harness_json else AgentHarness()
         client = self._client_for_provider(harness.provider)
         chat_model = harness.model or node.model_name
 
+        # 阶段 C：skill 注入 system_prompt
+        final_system, _ = self._skill_loader.apply(
+            harness.skills, sub_task, harness.system_prompt
+        )
+
         agent_kwargs: dict = {"agent_id": node.node_name, "client": client}
         if chat_model:
             agent_kwargs["chat_model"] = chat_model
-        if harness.system_prompt:
-            agent_kwargs["system_prompt"] = harness.system_prompt
+        if final_system:
+            agent_kwargs["system_prompt"] = final_system
         agent = Agent(**agent_kwargs)
 
-        # 阶段 B：若 harness 声明了 tools 且 client 是 Anthropic/OpenAI 兼容，
-        # 走 tool-use loop；否则维持单轮 respond（mock 测试 / 老式 client 走这）。
-        registry = ToolRegistry.from_specs(harness.tools) if harness.tools else None
+        # 阶段 B+C：合并 builtin tools + MCP tools 进 ToolRegistry
+        mcp_clients: list = []
+        mcp_tools_list: list = []
+        if harness.mcp_servers:
+            mcp_clients, mcp_tools_list = await mcp_connect_all(harness.mcp_servers)
+
+        registry: ToolRegistry | None = None
+        if harness.tools or mcp_tools_list:
+            registry = ToolRegistry.from_specs(harness.tools)
+            for t in mcp_tools_list:
+                registry.tools[t.name] = t
 
         try:
             async with HeartbeatTask(
@@ -359,6 +378,8 @@ class Scheduler:
                 error=str(e),
             )
         finally:
+            if mcp_clients:
+                await mcp_close_all(mcp_clients)
             try:
                 await self._sandbox.destroy(handle)
             except Exception as e:  # noqa: BLE001

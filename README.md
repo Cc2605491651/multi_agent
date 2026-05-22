@@ -31,6 +31,12 @@
   - memory_store 加 collection 缓存 + lock（修并发 Chroma `get_or_create` 竞态）
   - demo-phase4a：跑 spec §5.4 完整 DAG（3 并发 research → 2 writing → summarize，含 fail_skip / fail_retry / fail_fast 三种 policy）
 
+- **ABC 全段：完整 Agent Harness 体系**：✅ 完成（235 测试全过）
+  - **A 段（schema + provider）**：`AgentHarness {model, provider, system_prompt, tools, skills, mcp_servers}` 一次到位；DAG JSON 全节点声明 harness；多 provider 切换（anthropic / openai / deepseek / openrouter / ollama）；`LLM_PROVIDER` env + 各家专属 API key env；dashboard 节点详情完整展示 harness
+  - **B 段（tool-use 多轮）**：5 个内置 tool（read_file / write_file / exec_command / run_code / web_search）走 SandboxBackend 抽象；Anthropic + OpenAI 双家 tool_use loop（含 max_turns 保护、tool_result 回填、错误记录）；scheduler 节点级自动判定单轮 / 多轮
+  - **C 段（skills + MCP）**：`SkillLoader` 按 name / invoke_keywords 加载 markdown 指令包注入 system_prompt（项目 `skills/` + 用户 `~/.claude/skills/` 双查找）；`MCPClient` stdio JSON-RPC 2.0 客户端（initialize / list_tools / tools/call）；MCP tools 自动 prefix `mcp_<server>_<tool>` 合并到 ToolRegistry；scheduler 节点级 mcp 自动启停，单个 server 失败容忍
+  - 跑一次 6 节点 DAG：每个节点不同 provider / 不同 tools / 节点级 system_prompt + skill 注入，浏览器实时看到完整 harness
+
 - **阶段 4b（E2B 沙箱后端可插拔）**：✅ 完成
   - `worker/sandbox_e2b.py`：E2BBackend，走 `e2b` 官方 `AsyncSandbox`，6 个 async 方法都映射上（create / destroy / cancel / exec_command / run_code / read_file / write_file）；cancel 简化为 kill 整个 sandbox（spec §5.3 允许）
   - `worker/sandbox.py` 加 `make_sandbox()` 工厂：按 `SANDBOX_BACKEND=local|e2b` 选；上层零改动

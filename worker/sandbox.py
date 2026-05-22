@@ -1,13 +1,13 @@
 """沙箱抽象（spec v4 §7.2）。
 
-阶段 1 只实现 ``LocalBackend``；阶段 4 加 ``E2BBackend`` / ``CubeSandboxBackend``
-时上层零改动。接口完整覆盖 ``cancel`` / ``read_file`` / ``write_file`` /
-``exec_command`` / ``run_code``——spec §13 明确这五样必须一次到位。
+阶段 1 实现 ``LocalBackend``；阶段 4b 起加 ``E2BBackend``，由 ``make_sandbox()``
+按环境变量 ``SANDBOX_BACKEND`` 选择，上层零改动。
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import sys
@@ -177,3 +177,21 @@ def shlex_quote(s: str) -> str:
     import shlex
 
     return shlex.quote(s)
+
+
+def make_sandbox(backend: str | None = None) -> SandboxBackend:
+    """按 ``SANDBOX_BACKEND`` 环境变量选 backend；上层不感知具体实现。
+
+    - ``local``（默认）：``LocalBackend``，本机跑，无隔离，无费用
+    - ``e2b``：``E2BBackend``，云端沙箱，需 ``E2B_API_KEY``
+    """
+    backend = (backend or os.environ.get("SANDBOX_BACKEND", "local")).strip().lower()
+    if backend == "local":
+        return LocalBackend()
+    if backend == "e2b":
+        from worker.sandbox_e2b import E2BBackend
+
+        return E2BBackend()
+    raise ValueError(
+        f"unknown SANDBOX_BACKEND={backend!r}; expected 'local' or 'e2b'"
+    )

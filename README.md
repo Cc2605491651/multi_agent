@@ -31,6 +31,13 @@
   - memory_store 加 collection 缓存 + lock（修并发 Chroma `get_or_create` 竞态）
   - demo-phase4a：跑 spec §5.4 完整 DAG（3 并发 research → 2 writing → summarize，含 fail_skip / fail_retry / fail_fast 三种 policy）
 
+- **阶段 4b（E2B 沙箱后端可插拔）**：✅ 完成
+  - `worker/sandbox_e2b.py`：E2BBackend，走 `e2b` 官方 `AsyncSandbox`，6 个 async 方法都映射上（create / destroy / cancel / exec_command / run_code / read_file / write_file）；cancel 简化为 kill 整个 sandbox（spec §5.3 允许）
+  - `worker/sandbox.py` 加 `make_sandbox()` 工厂：按 `SANDBOX_BACKEND=local|e2b` 选；上层零改动
+  - `.env.example`：API key 位置预留（`E2B_API_KEY=`），不入 git
+  - 测试：16 个 case，全程 mock AsyncSandbox 不打真实 API（跑真烟测请另写脚本 + 设 `E2B_API_KEY`）
+  - 切换方式：`export SANDBOX_BACKEND=e2b E2B_API_KEY=...` 后任何 demo / `run-task` 命令零改动跑在 e2b 上
+
 - **阶段 5（运行时仪表盘）**：✅ 完成
   - `dag_nodes` 表扩两列 `model_name` / `tools`（ALTER TABLE 兼容迁移）；DAG JSON 节点可声明 `"model"` / `"tools"`，scheduler 用节点 `model_name` 实例化 Agent
   - `orchestrator/api.py`：FastAPI 只读 API，`/api/tasks` + `/api/dag-status?task_id=`，走 `state_store` 不直连 sqlite3（spec §10.2）
@@ -78,6 +85,12 @@ python -m orchestrator.main run-task --dag dags/research_report.json \
 # 真实 Claude API
 export ANTHROPIC_API_KEY=...
 python -m orchestrator.main demo-phase4a --reset
+
+# 切到 E2B 云沙箱（按用量计费，开发期免费 $100 credits）
+cp .env.example .env  # 编辑填 E2B_API_KEY
+export SANDBOX_BACKEND=e2b
+export E2B_API_KEY=...
+python -m orchestrator.main demo-phase4a --reset  # 业务代码零改动
 
 # 阶段 5 仪表盘（先跑 run-task 落数据，再起服务，浏览器开 http://127.0.0.1:8000）
 python -m orchestrator.main run-task --dag dags/research_report.json \

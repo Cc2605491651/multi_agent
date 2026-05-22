@@ -26,7 +26,7 @@ from storage.memory_store import MemoryStore
 from storage.state_store import StateStore
 from storage.transcript_store import TranscriptStore
 from worker.agent import Agent, default_client
-from worker.sandbox import LocalBackend
+from worker.sandbox import make_sandbox
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 TRANSCRIPT_DB = DATA_DIR / "transcript.db"
@@ -332,7 +332,7 @@ async def run_demo_phase2(*, mock: bool, reset: bool) -> int:
     transcript_store = TranscriptStore(TRANSCRIPT_DB)
     memory_store = MemoryStore(CHROMA_DIR)
     state_store = StateStore(STATE_DB)
-    sandbox = LocalBackend()
+    sandbox = make_sandbox()
     recovery = Recovery(state_store, memory_store, stale_seconds=300)
 
     if mock:
@@ -560,7 +560,7 @@ async def run_demo_phase3(*, mock: bool, reset: bool) -> int:
     transcript_store = TranscriptStore(TRANSCRIPT_DB)
     memory_store = MemoryStore(CHROMA_DIR)
     state_store = StateStore(STATE_DB)
-    sandbox = LocalBackend()
+    sandbox = make_sandbox()
     recovery = Recovery(state_store, memory_store, stale_seconds=300)
     packer = ContextPacker(
         state_store=state_store,
@@ -685,7 +685,7 @@ async def run_demo_phase4a(*, mock: bool, reset: bool, fail_b: bool) -> int:
     transcript_store = TranscriptStore(TRANSCRIPT_DB)
     memory_store = MemoryStore(CHROMA_DIR)
     state_store = StateStore(STATE_DB)
-    sandbox = LocalBackend()
+    sandbox = make_sandbox()
     recovery = Recovery(state_store, memory_store, stale_seconds=300)
     packer = ContextPacker(
         state_store=state_store,
@@ -802,7 +802,7 @@ async def run_task_cli(
     transcript_store = TranscriptStore(TRANSCRIPT_DB)
     memory_store = MemoryStore(CHROMA_DIR)
     state_store = StateStore(STATE_DB)
-    sandbox = LocalBackend()
+    sandbox = make_sandbox()
     recovery = Recovery(state_store, memory_store, stale_seconds=300)
     packer = ContextPacker(
         state_store=state_store,

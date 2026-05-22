@@ -33,6 +33,7 @@ from worker.harness import AgentHarness
 from worker.heartbeat import HeartbeatTask
 from worker.llm_clients import make_llm_client
 from worker.sandbox import SandboxBackend, SandboxHandle
+from worker.tools import ToolRegistry
 from worker.writeback import writeback_turn
 
 _log = logging.getLogger(__name__)
@@ -295,11 +296,25 @@ class Scheduler:
         if harness.system_prompt:
             agent_kwargs["system_prompt"] = harness.system_prompt
         agent = Agent(**agent_kwargs)
+
+        # 阶段 B：若 harness 声明了 tools 且 client 是 Anthropic/OpenAI 兼容，
+        # 走 tool-use loop；否则维持单轮 respond（mock 测试 / 老式 client 走这）。
+        registry = ToolRegistry.from_specs(harness.tools) if harness.tools else None
+
         try:
             async with HeartbeatTask(
                 self._state_store, node.id, interval=self._heartbeat_interval
             ):
-                agent_output = await agent.respond([], packed.text)
+                if registry and registry.names() and self._can_use_tools(agent):
+                    loop_res = await agent.run_with_tools(
+                        packed.text,
+                        registry=registry,
+                        sandbox=self._sandbox,
+                        handle=handle,
+                    )
+                    agent_output = loop_res.final_text
+                else:
+                    agent_output = await agent.respond([], packed.text)
                 conv_id = f"conv_{ctx.task_id}_{node.id}"
                 result = await writeback_turn(
                     transcript_store=self._transcript_store,
@@ -388,6 +403,14 @@ class Scheduler:
                 break
 
     # ---- DAG helpers ----
+
+    @staticmethod
+    def _can_use_tools(agent: Agent) -> bool:
+        """判定 agent.client 是否支持 tool-use loop。"""
+        from worker.agent import AnthropicClient
+        from worker.llm_clients import OpenAICompatibleClient
+
+        return isinstance(agent.client, (AnthropicClient, OpenAICompatibleClient))
 
     def _client_for_provider(self, provider: str | None) -> LLMClient:
         if self._force_default or not provider:

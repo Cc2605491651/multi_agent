@@ -301,6 +301,106 @@ async def test_upstream_fail_retry_cascades_skip_to_downstream(env) -> None:
     assert (await state.get_dag_node(down)).status == "skipped"
 
 
+async def test_scheduler_uses_tool_loop_when_harness_declares_tools(env, monkeypatch) -> None:
+    """阶段 ABC.B.4：harness 声明 tools + OpenAI 兼容 client → 真走 tool-use loop。"""
+    import json as _json
+    from pathlib import Path
+
+    import httpx
+
+    from orchestrator.context_packer import ContextPacker
+    from orchestrator.failure_handler import FailureHandler
+    from orchestrator.recovery import Recovery
+    from orchestrator.scheduler import Scheduler
+    from storage.memory_store import MemoryStore
+    from storage.state_store import StateStore
+    from storage.transcript_store import TranscriptStore
+    from worker.harness import AgentHarness, ToolSpec
+    from worker.llm_clients import OpenAICompatibleClient
+    from worker.sandbox import LocalBackend
+
+    # 脚本化两轮：1) 模型说调 run_code 2) 拿到结果给最终文本
+    scripted = [
+        {"choices": [{
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {
+                        "name": "run_code",
+                        "arguments": _json.dumps({"code": "print('ABC.B done')"}),
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }]},
+        {"choices": [{
+            "message": {"role": "assistant", "content": "已运行代码，结论：ABC.B done"},
+            "finish_reason": "stop",
+        }]},
+    ]
+    state_holder = {"idx": 0, "requests": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content.decode())
+        state_holder["requests"].append(body)
+        # writeback 的 distill 也走同一 client；用 system prompt 关键词区分
+        for m in body.get("messages", []):
+            if m.get("role") == "system" and "提炼员" in (m.get("content") or ""):
+                return httpx.Response(
+                    200,
+                    json={"choices": [{
+                        "message": {"role": "assistant", "content": "mock 提炼结论"},
+                        "finish_reason": "stop",
+                    }]},
+                )
+        if state_holder["idx"] >= len(scripted):
+            return httpx.Response(500, json={"error": "no more scripted"})
+        resp = scripted[state_holder["idx"]]
+        state_holder["idx"] += 1
+        return httpx.Response(200, json=resp)
+
+    real_async = httpx.AsyncClient
+
+    class _Patched(real_async):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+    monkeypatch.setattr(httpx, "AsyncClient", _Patched)
+
+    state, *_ = env
+    tid = await state.create_task(user_id="default_user", title="t", dag_id="d")
+    harness = AgentHarness(
+        model="gpt-4o-mini", provider="openai",
+        tools=[ToolSpec(name="run_code"), ToolSpec(name="read_file")],
+    )
+    nid = await state.create_dag_node(
+        task_id=tid, node_name="research_w_tools", harness=harness
+    )
+
+    # 构造一个 OpenAI 兼容 mock client；force_default_client=True 让 scheduler 不去
+    # 重新 make_llm_client（避免 ANTHROPIC_API_KEY 必填）
+    mock_client = OpenAICompatibleClient(
+        base_url="https://mock/v1", api_key="k",
+        default_model="gpt-4o-mini",
+    )
+
+    scheduler = _build(env, mock_client)
+    # 替换 force flag：因为 _build 默认设 default_provider=anthropic，
+    # 而我们的 mock 是 OpenAI provider；用 force_default_client 让它仍走 mock_client
+    scheduler._force_default = True
+
+    final = await scheduler.run_task(tid)
+    assert final == "done"
+    n = await state.get_dag_node(nid)
+    assert n.status == "done"
+
+    # 第 2 轮请求里应该有 role=tool 消息（OpenAI 协议）
+    second_req = state_holder["requests"][1]
+    roles = [m["role"] for m in second_req["messages"]]
+    assert "tool" in roles, f"expected tool role in second request, got {roles}"
+
+
 async def test_recovery_runs_before_task(env) -> None:
     state, *_ = env
     client = _ScriptedClient(

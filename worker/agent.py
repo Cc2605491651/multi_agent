@@ -95,6 +95,58 @@ class Agent:
             max_tokens=1024,
         )
 
+    async def run_with_tools(
+        self,
+        packed_text: str,
+        *,
+        registry,  # ToolRegistry
+        sandbox,  # SandboxBackend
+        handle,  # SandboxHandle
+        max_tokens: int = 2048,
+        max_turns: int = 10,
+    ):
+        """多轮 tool-use loop（spec §7，阶段 ABC.B.3）。
+
+        根据 client 类型分派：
+        - ``AnthropicClient`` → ``run_anthropic_tool_loop``
+        - ``OpenAICompatibleClient`` → ``run_openai_tool_loop``
+
+        返回 ``ToolLoopResult``（含 final_text + tool_calls 列表）。
+        """
+        from worker.llm_clients import OpenAICompatibleClient
+        from worker.tool_loop import (
+            run_anthropic_tool_loop,
+            run_openai_tool_loop,
+        )
+
+        if isinstance(self.client, AnthropicClient):
+            return await run_anthropic_tool_loop(
+                anthropic_client=self.client,
+                model=self.chat_model,
+                system=self.system_prompt,
+                initial_user=packed_text,
+                registry=registry,
+                sandbox=sandbox, handle=handle,
+                max_tokens=max_tokens, max_turns=max_turns,
+            )
+        if isinstance(self.client, OpenAICompatibleClient):
+            return await run_openai_tool_loop(
+                base_url=self.client._base,
+                api_key=self.client._key,
+                extra_headers=self.client._extra_headers,
+                model=self.chat_model,
+                system=self.system_prompt,
+                initial_user=packed_text,
+                registry=registry,
+                sandbox=sandbox, handle=handle,
+                max_tokens=max_tokens, max_turns=max_turns,
+            )
+        # 不识别的 client（如 mock）→ 退化到无工具单轮
+        from worker.tool_loop import ToolLoopResult
+
+        out = await self.respond([], packed_text)
+        return ToolLoopResult(final_text=out, turns=1, tool_calls=[])
+
     async def distill(self, user_input: str, agent_output: str) -> str:
         """从单轮对话里提炼一句记忆。空字符串表示「不值得记」。"""
         prompt = (

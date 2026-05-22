@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS dag_nodes (
     memory_level      TEXT NOT NULL DEFAULT 'node_output',
     model_name        TEXT,
     tools             TEXT,
+    harness           TEXT,
     FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 CREATE INDEX IF NOT EXISTS idx_dag_nodes_task   ON dag_nodes(task_id);
@@ -93,6 +94,7 @@ class DagNodeRow:
     memory_level: str = "node_output"
     model_name: str | None = None
     tools: list[str] = field(default_factory=list)
+    harness_json: str | None = None  # 完整 AgentHarness JSON；可能为空（旧节点）
 
 
 def _utcnow() -> str:
@@ -144,6 +146,7 @@ def _row_to_node(row: sqlite3.Row) -> DagNodeRow:
         memory_level=row["memory_level"] if "memory_level" in cols else "node_output",
         model_name=row["model_name"] if "model_name" in cols else None,
         tools=_parse_json_list(row["tools"]) if "tools" in cols else [],
+        harness_json=row["harness"] if "harness" in cols else None,
     )
 
 
@@ -193,12 +196,17 @@ class StateStore:
         memory_level: str = "node_output",
         model_name: str | None = None,
         tools: list[str] | None = None,
+        harness: object | None = None,
         node_id: str | None = None,
     ) -> str:
         if failure_policy not in VALID_FAILURE_POLICY:
             raise ValueError(f"invalid failure_policy: {failure_policy}")
         if memory_level not in VALID_MEMORY_LEVEL:
             raise ValueError(f"invalid memory_level: {memory_level}")
+        harness_json: str | None = None
+        if harness is not None and hasattr(harness, "to_json"):
+            if not harness.is_empty():  # type: ignore[attr-defined]
+                harness_json = harness.to_json()  # type: ignore[attr-defined]
         return await asyncio.to_thread(
             self._create_dag_node_sync,
             task_id,
@@ -209,6 +217,7 @@ class StateStore:
             memory_level,
             model_name,
             list(tools) if tools else [],
+            harness_json,
             node_id,
         )
 
@@ -301,6 +310,8 @@ class StateStore:
                 conn.execute("ALTER TABLE dag_nodes ADD COLUMN model_name TEXT")
             if "tools" not in cols:
                 conn.execute("ALTER TABLE dag_nodes ADD COLUMN tools TEXT")
+            if "harness" not in cols:
+                conn.execute("ALTER TABLE dag_nodes ADD COLUMN harness TEXT")
 
     def _create_task_sync(
         self,
@@ -356,6 +367,7 @@ class StateStore:
         memory_level: str,
         model_name: str | None,
         tools: list[str],
+        harness_json: str | None,
         node_id: str | None,
     ) -> str:
         nid = node_id or f"node_{uuid.uuid4().hex[:12]}"
@@ -366,8 +378,8 @@ class StateStore:
                     (id, task_id, node_name, depends_on, status,
                      failure_policy, retry_count, max_retries,
                      input_memory_ids, memory_level,
-                     model_name, tools)
-                VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, '[]', ?, ?, ?)
+                     model_name, tools, harness)
+                VALUES (?, ?, ?, ?, 'pending', ?, 0, ?, '[]', ?, ?, ?, ?)
                 """,
                 (
                     nid,
@@ -379,6 +391,7 @@ class StateStore:
                     memory_level,
                     model_name,
                     json.dumps(tools) if tools else None,
+                    harness_json,
                 ),
             )
         return nid

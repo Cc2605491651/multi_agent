@@ -111,10 +111,8 @@ class Agent:
         return out.strip().strip("\"'「」“”")
 
 
-def default_client() -> AnthropicClient:
-    """要求 ``ANTHROPIC_API_KEY`` 已配置；缺则抛错。"""
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY not set; export it or pass api_key explicitly"
-        )
-    return AnthropicClient()
+def default_client() -> "LLMClient":
+    """按 ``LLM_PROVIDER`` env 工厂选 LLM；缺 key 抛错。"""
+    from worker.llm_clients import make_llm_client
+
+    return make_llm_client()

@@ -220,3 +220,101 @@ async def test_loaded_5_4_dag_has_per_node_models(tmp_path: Path) -> None:
     assert summarize.model_name == "claude-opus-4-7"
     assert summarize.memory_level == "task_conclusion"
     assert "write_file" in summarize.tools
+
+
+# ---- ABC.A 新增：harness 字段 ----
+
+
+def test_parse_full_harness_field() -> None:
+    d = parse_dag(
+        {
+            "dag_id": "x",
+            "nodes": [
+                {
+                    "id": "n1", "name": "a", "deps": [],
+                    "harness": {
+                        "model": "deepseek-chat",
+                        "provider": "deepseek",
+                        "system_prompt": "你是专业研究员",
+                        "tools": [
+                            {"name": "web_search", "description": "联网"},
+                            "read_file",
+                        ],
+                        "skills": [{"name": "fact-check"}],
+                        "mcp_servers": [
+                            {"name": "fs", "command": "npx", "args": ["@mcp/fs"]}
+                        ],
+                    },
+                },
+            ],
+        }
+    )
+    h = d.nodes[0].harness
+    assert h.model == "deepseek-chat"
+    assert h.provider == "deepseek"
+    assert h.system_prompt == "你是专业研究员"
+    assert [t.name for t in h.tools] == ["web_search", "read_file"]
+    assert h.skills[0].name == "fact-check"
+    assert h.mcp_servers[0].command == "npx"
+    # effective_model 落到节点字段
+    assert d.nodes[0].model_name == "deepseek-chat"
+    assert d.nodes[0].tools == ["web_search", "read_file"]
+
+
+def test_legacy_flat_fields_still_work() -> None:
+    """老式 model/tools 平铺写法 → 自动 fold 进 harness。"""
+    d = parse_dag(
+        {
+            "dag_id": "x",
+            "nodes": [
+                {
+                    "id": "n1", "name": "a", "deps": [],
+                    "model": "gpt-4o-mini",
+                    "tools": ["web_search"],
+                },
+            ],
+        }
+    )
+    h = d.nodes[0].harness
+    assert h.model == "gpt-4o-mini"
+    assert [t.name for t in h.tools] == ["web_search"]
+
+
+async def test_instantiate_writes_harness_json(tmp_path: Path) -> None:
+    state = StateStore(tmp_path / "state.db")
+    d = parse_dag(
+        {
+            "dag_id": "x",
+            "nodes": [
+                {
+                    "id": "n1", "name": "a", "deps": [],
+                    "harness": {
+                        "model": "claude-opus-4-7",
+                        "provider": "anthropic",
+                        "tools": ["read_file"],
+                    },
+                },
+            ],
+        }
+    )
+    _, mapping = await instantiate_dag(state, d, user_id="u", title="t")
+    n = await state.get_dag_node(mapping["n1"])
+    assert n.harness_json is not None
+    import json as _json
+
+    parsed = _json.loads(n.harness_json)
+    assert parsed["model"] == "claude-opus-4-7"
+    assert parsed["provider"] == "anthropic"
+    assert parsed["tools"] == [{"name": "read_file", "description": "", "params": {}}]
+
+
+def test_invalid_harness_raises() -> None:
+    with pytest.raises(ValueError, match="harness"):
+        parse_dag(
+            {
+                "dag_id": "x",
+                "nodes": [
+                    {"id": "n1", "name": "a", "deps": [], "harness": 42},
+                ],
+            }
+        )

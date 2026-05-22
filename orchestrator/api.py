@@ -32,6 +32,22 @@ _DEFAULT_STATE_DB = _PROJECT_ROOT / "data" / "state.db"
 
 
 def _node_to_dict(n: DagNodeRow) -> dict[str, Any]:
+    import json as _json
+
+    from worker.harness import AgentHarness
+
+    harness_dict: dict[str, Any] | None = None
+    if n.harness_json:
+        try:
+            harness_dict = AgentHarness.from_dict(n.harness_json).to_dict()
+        except Exception:
+            harness_dict = None
+    if harness_dict is None:
+        # 旧节点：从平铺 model_name/tools 合成一个最小 harness 给前端展示
+        harness_dict = AgentHarness.from_legacy(
+            model_name=n.model_name, tools=n.tools
+        ).to_dict()
+
     return {
         "id": n.id,
         "name": n.node_name,
@@ -49,6 +65,7 @@ def _node_to_dict(n: DagNodeRow) -> dict[str, Any]:
         "memory_level": n.memory_level,
         "model_name": n.model_name,
         "tools": n.tools,
+        "harness": harness_dict,
     }
 
 

@@ -872,6 +872,7 @@ async def run_task_cli(
         max_concurrent_workers=max_concurrent,
         heartbeat_interval=2.0,
         cancel_timeout=2.0,
+        force_default_client=mock,  # mock 时忽略 harness.provider 真实切换
     )
     final = await scheduler.run_task(task_id)
     print(f"\n[run-task] task 最终状态: {final}\n")

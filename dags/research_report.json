@@ -1,19 +1,79 @@
 {
   "dag_id": "research_report",
-  "description": "spec v4 §5.4 示例：3 并发调研 → 写作 → 汇总。阶段 4a 起启用 failure_policy；阶段 5 起每个节点声明 model + tools，仪表盘按 task 动态展示。",
+  "description": "spec v4 §5.4 示例 + 阶段 ABC.A 完整 harness 演示。每节点声明 model/provider/tools/skills/mcp_servers/system_prompt，仪表盘按 task 动态展示。",
   "nodes": [
-    {"id": "n1", "name": "research_a", "deps": [], "failure_policy": "fail_retry", "max_retries": 3,
-     "model": "claude-sonnet-4-6", "tools": ["web_search", "read_file"]},
-    {"id": "n2", "name": "research_b", "deps": [], "failure_policy": "fail_skip",
-     "model": "claude-haiku-4-5", "tools": ["web_search"]},
-    {"id": "n3", "name": "research_c", "deps": [], "failure_policy": "fail_retry",
-     "model": "claude-sonnet-4-6", "tools": ["web_search", "exec_command"]},
-    {"id": "n4", "name": "writing_a",  "deps": ["n1"], "failure_policy": "fail_retry",
-     "model": "claude-sonnet-4-6", "tools": ["write_file"]},
-    {"id": "n5", "name": "writing_b",  "deps": ["n2"], "failure_policy": "fail_retry",
-     "model": "claude-sonnet-4-6", "tools": ["write_file"]},
-    {"id": "n6", "name": "summarize",  "deps": ["n3", "n4", "n5"], "failure_policy": "fail_fast",
-     "model": "claude-opus-4-7", "tools": ["read_file", "write_file"],
-     "memory_level": "task_conclusion"}
+    {
+      "id": "n1", "name": "research_a", "deps": [],
+      "failure_policy": "fail_retry", "max_retries": 3,
+      "harness": {
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "system_prompt": "你是「调研 A」Agent：负责开源生态层面的调研。输出务必带 URL 引用。",
+        "tools": [
+          {"name": "web_search", "description": "联网检索"},
+          {"name": "read_file"}
+        ],
+        "skills": [
+          {"name": "fact-check", "description": "结论必须可追溯到至少 1 个一手来源"}
+        ]
+      }
+    },
+    {
+      "id": "n2", "name": "research_b", "deps": [],
+      "failure_policy": "fail_skip",
+      "harness": {
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "system_prompt": "你是「调研 B」Agent：负责中文社区的论坛/博客调研。",
+        "tools": ["web_search"]
+      }
+    },
+    {
+      "id": "n3", "name": "research_c", "deps": [],
+      "failure_policy": "fail_retry",
+      "harness": {
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "system_prompt": "你是「调研 C」Agent：负责竞品功能矩阵对比。",
+        "tools": ["web_search", "exec_command"],
+        "mcp_servers": [
+          {"name": "github", "command": "npx", "args": ["@modelcontextprotocol/server-github"]}
+        ]
+      }
+    },
+    {
+      "id": "n4", "name": "writing_a", "deps": ["n1"],
+      "failure_policy": "fail_retry",
+      "harness": {
+        "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
+        "system_prompt": "你是「写作 A」Agent：把开源调研结论写成 300 字以内的小节。",
+        "tools": ["write_file"]
+      }
+    },
+    {
+      "id": "n5", "name": "writing_b", "deps": ["n2"],
+      "failure_policy": "fail_retry",
+      "harness": {
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "system_prompt": "你是「写作 B」Agent：把中文社区调研结论写成 300 字以内的小节。",
+        "tools": ["write_file"]
+      }
+    },
+    {
+      "id": "n6", "name": "summarize", "deps": ["n3", "n4", "n5"],
+      "failure_policy": "fail_fast",
+      "memory_level": "task_conclusion",
+      "harness": {
+        "model": "claude-opus-4-7",
+        "provider": "anthropic",
+        "system_prompt": "你是「汇总」Agent：综合三路输入，给出最终选型决策与依据。输出层级清晰的 Markdown。",
+        "tools": ["read_file", "write_file"],
+        "skills": [
+          {"name": "structured-output", "description": "必须输出层级 Markdown"}
+        ]
+      }
+    }
   ]
 }

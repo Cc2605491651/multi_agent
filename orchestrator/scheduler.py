@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Callable
@@ -28,7 +29,9 @@ from storage.memory_store import MemoryStore
 from storage.state_store import DagNodeRow, StateStore
 from storage.transcript_store import TranscriptStore
 from worker.agent import Agent, LLMClient
+from worker.harness import AgentHarness
 from worker.heartbeat import HeartbeatTask
+from worker.llm_clients import make_llm_client
 from worker.sandbox import SandboxBackend, SandboxHandle
 from worker.writeback import writeback_turn
 
@@ -74,6 +77,8 @@ class Scheduler:
         max_concurrent_workers: int = DEFAULT_MAX_CONCURRENT,
         heartbeat_interval: float = 30.0,
         cancel_timeout: float = CANCEL_TIMEOUT_SECONDS,
+        default_provider: str | None = None,
+        force_default_client: bool = False,
     ) -> None:
         self._state_store = state_store
         self._transcript_store = transcript_store
@@ -87,6 +92,15 @@ class Scheduler:
         self._semaphore = asyncio.Semaphore(max_concurrent_workers)
         self._heartbeat_interval = heartbeat_interval
         self._cancel_timeout = cancel_timeout
+        # scheduler 默认 provider 标签：节点 harness 的 provider 匹配时直接复用
+        # ``self._llm``（避免在 mock 模式下被 make_llm_client 重新构造打到真实 API）
+        self._default_provider = (
+            default_provider or os.environ.get("LLM_PROVIDER", "anthropic")
+        ).strip().lower()
+        # mock / 集成测试场景：忽略 harness.provider，永远用 self._llm
+        self._force_default = force_default_client
+        # 节点级 provider 切换时的 client 缓存
+        self._provider_client_cache: dict[str, LLMClient] = {}
 
     async def run_task(self, task_id: str) -> str:
         await self._recovery.sweep_all()
@@ -270,9 +284,16 @@ class Scheduler:
         handle = await self._sandbox.create(context_package=packed.text)
         active_handles[node.id] = handle
 
-        agent_kwargs: dict = {"agent_id": node.node_name, "client": self._llm}
-        if node.model_name:
-            agent_kwargs["chat_model"] = node.model_name
+        # 解析节点 harness：覆盖 provider / model / system_prompt
+        harness = AgentHarness.from_dict(node.harness_json) if node.harness_json else AgentHarness()
+        client = self._client_for_provider(harness.provider)
+        chat_model = harness.model or node.model_name
+
+        agent_kwargs: dict = {"agent_id": node.node_name, "client": client}
+        if chat_model:
+            agent_kwargs["chat_model"] = chat_model
+        if harness.system_prompt:
+            agent_kwargs["system_prompt"] = harness.system_prompt
         agent = Agent(**agent_kwargs)
         try:
             async with HeartbeatTask(
@@ -367,6 +388,17 @@ class Scheduler:
                 break
 
     # ---- DAG helpers ----
+
+    def _client_for_provider(self, provider: str | None) -> LLMClient:
+        if self._force_default or not provider:
+            return self._llm
+        if provider.strip().lower() == self._default_provider:
+            return self._llm
+        if provider in self._provider_client_cache:
+            return self._provider_client_cache[provider]
+        client = make_llm_client(provider)
+        self._provider_client_cache[provider] = client
+        return client
 
     @staticmethod
     def _all_terminal(nodes: list[DagNodeRow]) -> bool:

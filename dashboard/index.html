@@ -244,13 +244,37 @@ function updateStatuses(nodes) {
 }
 
 function showNodeDetail(n) {
-  const tools = (n.tools || []).map(t => `<span class="chip tool">${escapeHtml(t)}</span>`).join('') || '<span class="row">（无）</span>';
-  const model = n.model_name
-    ? `<span class="chip model">${escapeHtml(n.model_name)}</span>`
-    : '<span class="row">（默认）</span>';
+  const harness = n.harness || {};
   const input_mids = (n.input_memory_ids || []).map(
     m => m ? `<div class="chip">${escapeHtml(m)}</div>` : '<div class="chip" style="background:#3d2c2c">null（上游跳过）</div>'
   ).join('') || '<span class="row">（无）</span>';
+
+  const modelChip = harness.model
+    ? `<span class="chip model">${escapeHtml(harness.model)}</span>` +
+      (harness.provider ? `<span class="chip" style="background:#3d2c2c;color:#ffa657">${escapeHtml(harness.provider)}</span>` : '')
+    : '<span class="row" style="color:var(--muted)">（默认 provider/model）</span>';
+
+  const tools = (harness.tools || []).map(t =>
+    `<span class="chip tool" title="${escapeHtml(t.description || '')}">${escapeHtml(t.name)}</span>`
+  ).join('') || '<span class="row" style="color:var(--muted)">（无）</span>';
+
+  const skills = (harness.skills || []).map(s =>
+    `<span class="chip" style="background:#2d2517;color:#f0c674" title="${escapeHtml(s.description || '')}">${escapeHtml(s.name)}</span>`
+  ).join('') || '<span class="row" style="color:var(--muted)">（无）</span>';
+
+  const mcps = (harness.mcp_servers || []).map(m => {
+    const cmd = [m.command, ...(m.args || [])].filter(Boolean).join(' ');
+    return `<div class="chip" style="background:#172d2d;color:#7ee7d8;display:block;margin:4px 0;font-size:11px">
+      <strong>${escapeHtml(m.name)}</strong>${cmd ? ' · ' + escapeHtml(cmd) : ''}
+    </div>`;
+  }).join('') || '<span class="row" style="color:var(--muted)">（无）</span>';
+
+  const sysPrompt = harness.system_prompt
+    ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:11px">查看 system prompt</summary>
+       <pre style="white-space:pre-wrap;font-size:11px;color:#c9d1d9;background:#0d1117;padding:8px;border-radius:4px;margin-top:6px">${escapeHtml(harness.system_prompt)}</pre>
+       </details>`
+    : '<span class="row" style="color:var(--muted)">（节点未覆盖默认 system prompt）</span>';
+
   document.getElementById('node-detail').innerHTML = `
     <div class="panel">
       <h3>节点</h3>
@@ -261,14 +285,28 @@ function showNodeDetail(n) {
       <div class="row"><span class="k">retry</span><span class="v">${n.retry_count} / ${n.max_retries}</span></div>
       <div class="row"><span class="k">memory_level</span><span class="v">${escapeHtml(n.memory_level)}</span></div>
     </div>
+
     <div class="panel">
-      <h3>模型</h3>
-      ${model}
+      <h3>Harness · 模型</h3>
+      ${modelChip}
     </div>
     <div class="panel">
-      <h3>工具</h3>
+      <h3>Harness · 工具 (${(harness.tools || []).length})</h3>
       ${tools}
     </div>
+    <div class="panel">
+      <h3>Harness · 技能 (${(harness.skills || []).length})</h3>
+      ${skills}
+    </div>
+    <div class="panel">
+      <h3>Harness · MCP servers (${(harness.mcp_servers || []).length})</h3>
+      ${mcps}
+    </div>
+    <div class="panel">
+      <h3>Harness · System Prompt</h3>
+      ${sysPrompt}
+    </div>
+
     <div class="panel">
       <h3>运行时</h3>
       <div class="row"><span class="k">worker_id</span><span class="v">${escapeHtml(n.worker_id || '—')}</span></div>

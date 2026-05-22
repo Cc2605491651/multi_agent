@@ -96,3 +96,52 @@ async def test_dag_status_reflects_state_changes(app_env) -> None:
     assert by_name["research"]["status"] == "running"
     assert by_name["research"]["worker_id"] == "w1"
     assert by_name["research"]["heartbeat_at"] is not None
+
+
+# ---- ABC.A 新增：harness 字段从 API 返回 ----
+
+
+async def test_dag_status_returns_full_harness(app_env) -> None:
+    """API 必须返回 harness 完整结构（仪表盘按这个画 chip）。"""
+    client, state = app_env
+    from worker.harness import AgentHarness, MCPServerSpec, SkillSpec, ToolSpec
+
+    tid = await state.create_task(user_id="u", title="t", dag_id="d")
+    harness = AgentHarness(
+        model="claude-opus-4-7", provider="anthropic",
+        system_prompt="你是研究员",
+        tools=[ToolSpec(name="web_search", description="联网")],
+        skills=[SkillSpec(name="fact-check")],
+        mcp_servers=[MCPServerSpec(name="fs", command="npx")],
+    )
+    await state.create_dag_node(
+        task_id=tid, node_name="x",
+        depends_on=[], harness=harness,
+    )
+
+    r = client.get(f"/api/dag-status?task_id={tid}")
+    nodes = r.json()["nodes"]
+    h = nodes[0]["harness"]
+    assert h["model"] == "claude-opus-4-7"
+    assert h["provider"] == "anthropic"
+    assert h["system_prompt"] == "你是研究员"
+    assert h["tools"][0]["name"] == "web_search"
+    assert h["tools"][0]["description"] == "联网"
+    assert h["skills"][0]["name"] == "fact-check"
+    assert h["mcp_servers"][0]["name"] == "fs"
+
+
+async def test_dag_status_legacy_node_synthesizes_harness(app_env) -> None:
+    """旧节点没 harness_json，API 应从 model_name/tools 合成最小 harness 给前端。"""
+    client, state = app_env
+    tid = await state.create_task(user_id="u", title="t", dag_id="d")
+    await state.create_dag_node(
+        task_id=tid, node_name="x",
+        model_name="gpt-4o-mini", tools=["read_file"],
+    )
+    r = client.get(f"/api/dag-status?task_id={tid}")
+    h = r.json()["nodes"][0]["harness"]
+    assert h["model"] == "gpt-4o-mini"
+    assert h["tools"][0]["name"] == "read_file"
+    assert h["skills"] == []
+    assert h["mcp_servers"] == []

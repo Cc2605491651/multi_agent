@@ -28,6 +28,7 @@ from storage.state_store import (
     VALID_FAILURE_POLICY,
     VALID_MEMORY_LEVEL,
 )
+from worker.harness import AgentHarness
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class DagNodeDef:
     memory_level: str = "node_output"
     model_name: str | None = None
     tools: list[str] = field(default_factory=list)
+    harness: AgentHarness = field(default_factory=AgentHarness)
 
 
 @dataclass(frozen=True)
@@ -120,12 +122,36 @@ def _parse_dag(raw: dict) -> DagDef:
             raise ValueError(f"node {nid}: model must be a non-empty string if set")
 
         tools = n.get("tools", [])
-        if not isinstance(tools, list) or not all(
-            isinstance(t, str) and t for t in tools
-        ):
-            raise ValueError(
-                f"node {nid}: tools must be a list of non-empty strings"
-            )
+        if not isinstance(tools, list):
+            raise ValueError(f"node {nid}: tools must be a list")
+        # 平铺 tools 既可纯 string 也可 {name, ...} dict
+        for t in tools:
+            if isinstance(t, str):
+                if not t:
+                    raise ValueError(f"node {nid}: tools[] string must be non-empty")
+            elif isinstance(t, dict):
+                if not t.get("name"):
+                    raise ValueError(f"node {nid}: tools[] dict requires 'name'")
+            else:
+                raise ValueError(
+                    f"node {nid}: tools[] entry must be str or dict, got {type(t).__name__}"
+                )
+
+        # 阶段 A：harness 字段（dict 内联）；同时兼容老式平铺 model/tools
+        harness_raw = n.get("harness")
+        try:
+            if harness_raw is not None:
+                harness = AgentHarness.from_dict(harness_raw)
+            else:
+                harness = AgentHarness.from_legacy(
+                    model_name=model_name,
+                    tools=[t if isinstance(t, str) else t["name"] for t in tools],
+                )
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"node {nid}: invalid harness: {e}") from e
+
+        # 节点级 model_name 字段取 harness.model 与平铺 model 的优先级：harness 优先
+        effective_model = harness.model or model_name
 
         parsed_nodes.append(
             DagNodeDef(
@@ -135,8 +161,10 @@ def _parse_dag(raw: dict) -> DagDef:
                 failure_policy=policy,
                 max_retries=max_retries,
                 memory_level=memory_level,
-                model_name=model_name,
-                tools=list(tools),
+                model_name=effective_model,
+                tools=[t.name for t in harness.tools] if harness.tools
+                      else [t if isinstance(t, str) else t["name"] for t in tools],
+                harness=harness,
             )
         )
 
@@ -211,6 +239,7 @@ async def instantiate_dag(
             memory_level=n.memory_level,
             model_name=n.model_name,
             tools=n.tools,
+            harness=n.harness,
         )
         mapping[n.id] = nid
     return task_id, mapping

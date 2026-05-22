@@ -2,102 +2,556 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>multi_agent · 运行时仪表盘</title>
-<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+<title>多 Agent 协作运行时 · multi_agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Caveat:wght@400;700&family=ZCOOL+KuaiLe&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+<script src="https://unpkg.com/roughjs@4.6.6/bundled/rough.js"></script>
+<script src="https://unpkg.com/gsap@3.12.5/dist/gsap.min.js"></script>
+<script src="https://unpkg.com/gsap@3.12.5/dist/MotionPathPlugin.min.js"></script>
 <style>
   :root{
-    --bg:#0d1117; --fg:#e6edf3; --muted:#8b949e; --line:#30363d;
-    --card:#161b22; --accent:#2f81f7;
-    --wait:#30363d; --wait-text:#8b949e;
-    --run:#1f6feb;
-    --done:#238636; --done-edge:#3fb950;
-    --fail:#da3633; --skip:#8b949e;
-    --chip-bg:#21262d; --chip-fg:#c9d1d9;
+    --paper:#fdf8ea;
+    --paper-line:#e6dfc6;
+    --ink:#3a3026;
+    --ink-soft:#6e5d49;
+    --accent:#4a90e2;
+
+    /* 状态色（饱和度调低，蜡笔感）*/
+    --pending:#bdb6a6;
+    --pending-bg:#f3eed7;
+    --running:#62a3ff;
+    --running-bg:#dbe7fb;
+    --done:#86c98a;
+    --done-bg:#e0f1da;
+    --failed:#ee7373;
+    --failed-bg:#fbdedc;
+    --skipped:#a8a8a8;
+    --skipped-bg:#ebe7df;
+    --retry:#f4a44b;
+    --retry-bg:#fce4c6;
+
+    --chip-yellow:#f7d774;
+    --chip-blue:#7ccaf2;
+    --chip-pink:#f7a8c4;
+    --chip-purple:#c6a5e5;
+
+    --border:#3a3026;
   }
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
-    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:13px}
-  .layout{display:grid;grid-template-columns:280px 1fr 360px;height:100vh}
-  aside,.right{background:var(--card);border-right:1px solid var(--line);overflow:auto}
-  .right{border-right:none;border-left:1px solid var(--line)}
-  header{padding:14px 16px;border-bottom:1px solid var(--line);font-weight:600;font-size:14px}
-  .task-list{padding:6px 0}
-  .task-item{padding:10px 16px;cursor:pointer;border-bottom:1px solid var(--line)}
-  .task-item:hover{background:#1c2129}
-  .task-item.active{background:#1f2937;border-left:3px solid var(--accent);padding-left:13px}
-  .task-title{font-weight:500;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .task-meta{color:var(--muted);font-size:11px}
-  .status-pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600}
-  .status-pill.pending{background:var(--wait);color:var(--wait-text)}
-  .status-pill.running{background:var(--run);color:#fff}
-  .status-pill.done{background:var(--done);color:#fff}
-  .status-pill.failed{background:var(--fail);color:#fff}
-  .status-pill.skipped{background:var(--skip);color:#fff}
+  html,body{
+    margin:0; height:100%;
+    color:var(--ink);
+    background:var(--paper);
+    font-family:'Patrick Hand','ZCOOL KuaiLe','PingFang SC','Hiragino Sans GB',sans-serif;
+    font-size:15px;
+    overflow:hidden;
+  }
 
-  #graph{height:100%;background:radial-gradient(#1a1f25 1px,transparent 1px) 0 0 / 22px 22px;}
-  .topbar{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line);background:#0d1117}
-  .topbar h2{margin:0;font-size:14px;font-weight:600}
-  .topbar .meta{color:var(--muted)}
-  .topbar .poll{margin-left:auto;color:var(--muted);font-size:11px}
-  .topbar .poll .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#3fb950;margin-right:6px;animation:pulse 1.5s ease-in-out infinite}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-  .stage{height:calc(100% - 48px);position:relative}
+  /* 纸张背景：方格 + 涂鸦装饰 */
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+    background-image:
+      linear-gradient(var(--paper-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--paper-line) 1px, transparent 1px);
+    background-size: 26px 26px;
+    opacity:0.45;
+  }
 
-  .right .empty{padding:40px 20px;color:var(--muted);text-align:center}
-  .right header{display:flex;align-items:center;justify-content:space-between}
-  .panel{padding:14px 18px;border-bottom:1px solid var(--line)}
-  .panel h3{margin:0 0 8px 0;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px}
-  .row{display:flex;justify-content:space-between;padding:4px 0;font-size:12px}
-  .row .k{color:var(--muted)}
-  .row .v{color:var(--fg);font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
-  .chip{display:inline-block;background:var(--chip-bg);color:var(--chip-fg);
-    padding:3px 8px;border-radius:5px;font-size:11px;margin:2px 4px 2px 0;font-family:ui-monospace,Menlo,monospace}
-  .chip.model{background:#0d419d;color:#e6edf3}
-  .chip.tool{background:#1f2937;color:#9ecbff}
-  .legend{display:flex;gap:8px;padding:10px 18px;border-top:1px solid var(--line);background:#0d1117}
-  .legend .l{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
-  .legend .swatch{width:12px;height:12px;border-radius:3px}
+  .layout{display:grid; grid-template-columns:300px 1fr 380px; grid-template-rows:64px 1fr; height:100vh; position:relative; z-index:1}
+
+  /* === 顶栏 === */
+  header.top{
+    grid-column:1 / 4;
+    display:flex; align-items:center; gap:14px;
+    padding:0 22px;
+    background:var(--paper);
+    border-bottom:2px dashed var(--ink);
+  }
+  .brand{
+    font-family:'ZCOOL KuaiLe','Caveat',cursive;
+    font-size:28px; font-weight:700;
+    color:var(--ink);
+    display:flex; align-items:center; gap:10px;
+    transform:rotate(-1deg);
+  }
+  .brand .logo{font-size:32px; transform:rotate(-8deg); display:inline-block}
+  .task-header{
+    flex:1; display:flex; align-items:center; gap:14px;
+    padding:8px 18px;
+    border:2px solid var(--ink);
+    border-radius:22px;
+    background:#fff;
+    transform:rotate(-0.3deg);
+    box-shadow: 3px 4px 0 var(--ink-soft);
+  }
+  .task-header .star{font-size:24px; color:#f5b942}
+  .task-header .name{font-size:18px; font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .status-badge{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:6px 14px; border:2px solid var(--ink); border-radius:18px;
+    font-size:13px; font-weight:600;
+    background:#fff;
+  }
+  .status-badge .dot{width:10px; height:10px; border-radius:50%; animation:dot-pulse 1.8s ease-in-out infinite}
+  .status-badge.running{background:var(--running-bg); border-color:var(--running)}
+  .status-badge.running .dot{background:var(--running)}
+  .status-badge.done{background:var(--done-bg); border-color:var(--done)}
+  .status-badge.done .dot{background:var(--done); animation:none}
+  .status-badge.failed{background:var(--failed-bg); border-color:var(--failed)}
+  .status-badge.failed .dot{background:var(--failed)}
+  .status-badge.pending{background:var(--pending-bg); border-color:var(--pending)}
+  .status-badge.pending .dot{background:var(--pending); animation:none}
+  .status-badge.skipped{background:var(--skipped-bg); border-color:var(--skipped)}
+  .status-badge.skipped .dot{background:var(--skipped); animation:none}
+  .status-badge.retrying{background:var(--retry-bg); border-color:var(--retry)}
+  .status-badge.retrying .dot{background:var(--retry)}
+
+  @keyframes dot-pulse{
+    0%,100%{transform:scale(1); opacity:1}
+    50%{transform:scale(1.4); opacity:0.5}
+  }
+
+  .top-tools{display:flex; gap:6px}
+  .top-tools button{
+    border:2px solid var(--ink); border-radius:14px;
+    background:#fff; padding:6px 10px;
+    cursor:pointer; font-size:16px;
+    font-family:inherit; color:var(--ink);
+    transition:transform .15s;
+  }
+  .top-tools button:hover{transform:translateY(-2px) rotate(-2deg)}
+  .top-tools .overview{
+    background:var(--ink); color:#fff; padding:6px 14px;
+    border-radius:14px; display:flex; align-items:center; gap:6px;
+  }
+
+  /* === 左栏：任务列表 === */
+  aside.tasks{
+    grid-row:2; grid-column:1;
+    border-right:2px dashed var(--ink);
+    background:rgba(253,248,234,0.6);
+    overflow:auto;
+    padding:14px 12px;
+  }
+  .tasks-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:8px 12px; margin-bottom:10px;
+    background:#fff; border:2px solid var(--ink); border-radius:16px;
+    font-size:16px; font-weight:600;
+    transform:rotate(-0.5deg);
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .tasks-head .add{
+    background:var(--done-bg); border:1.5px solid var(--ink);
+    width:28px; height:28px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    font-size:18px; font-weight:bold; cursor:pointer;
+  }
+  .task-card{
+    background:#fff; border:2px solid var(--ink); border-radius:18px;
+    padding:12px 14px; margin-bottom:12px;
+    cursor:pointer; position:relative;
+    transition:transform .15s, box-shadow .15s;
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .task-card:hover{transform:translateY(-2px) rotate(-0.5deg); box-shadow:3px 5px 0 var(--ink-soft)}
+  .task-card.active{
+    background:#fffbef; transform:rotate(0.8deg);
+    box-shadow: 3px 4px 0 var(--accent);
+  }
+  .task-card.active::after{
+    content:"⭐"; position:absolute; top:-8px; right:-8px;
+    font-size:22px; transform:rotate(15deg);
+  }
+  .task-card .title{font-size:15px; font-weight:600; line-height:1.3; margin-bottom:8px}
+  .task-card .meta{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--ink-soft)}
+  .task-card .pill{
+    padding:2px 10px; border:1.5px solid var(--ink); border-radius:10px;
+    font-size:11px; font-weight:600;
+  }
+  .task-card .pill.done{background:var(--done-bg); border-color:var(--done)}
+  .task-card .pill.running{background:var(--running-bg); border-color:var(--running)}
+  .task-card .pill.failed{background:var(--failed-bg); border-color:var(--failed)}
+  .task-card .pill.pending{background:var(--pending-bg); border-color:var(--pending)}
+
+  .tasks-footer{
+    margin-top:14px; padding:10px 12px;
+    border-top:2px dashed var(--ink-soft);
+    display:flex; align-items:center; justify-content:space-between;
+    font-size:12px; color:var(--ink-soft);
+  }
+
+  /* === 中央画布 === */
+  main.canvas-wrap{
+    grid-row:2; grid-column:2;
+    position:relative;
+    background:transparent;
+    overflow:hidden;
+  }
+  .canvas-toolbar{
+    position:absolute; top:14px; left:14px; right:14px;
+    display:flex; align-items:center; gap:10px; z-index:5;
+  }
+  .canvas-toolbar .tool-group{
+    display:flex; gap:4px;
+    background:#fff; border:2px solid var(--ink); border-radius:14px;
+    padding:4px;
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .canvas-toolbar .tool{
+    width:30px; height:30px;
+    border:none; background:transparent;
+    border-radius:10px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    font-size:16px;
+    transition: background .12s;
+  }
+  .canvas-toolbar .tool:hover{background:#f6efd3}
+  .canvas-toolbar .tool.active{background:var(--accent); color:#fff}
+
+  .canvas-toolbar .layout-btn,
+  .canvas-toolbar .clear-btn{
+    border:2px solid var(--ink); border-radius:14px;
+    background:#fff; padding:6px 14px; cursor:pointer;
+    font-family:inherit; font-size:14px;
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .canvas-toolbar .clear-btn{background:#fff8dc}
+
+  .legend{
+    margin-left:auto;
+    display:flex; gap:14px; padding:6px 16px;
+    background:#fff; border:2px solid var(--ink); border-radius:14px;
+    font-size:12px;
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .legend .item{display:flex; align-items:center; gap:5px}
+  .legend .sw{width:10px; height:10px; border-radius:50%}
+
+  .minimap{
+    position:absolute; top:60px; right:14px; z-index:5;
+    width:200px; height:120px;
+    background:rgba(255,255,255,0.85);
+    border:2px dashed var(--accent); border-radius:14px;
+    overflow:hidden;
+  }
+
+  #canvas-svg{display:block}
+
+  .canvas-footer{
+    position:absolute; bottom:14px; left:14px; right:14px;
+    display:flex; align-items:center; gap:14px; z-index:5;
+  }
+  .zoom-controls{
+    display:flex; gap:4px; background:#fff;
+    border:2px solid var(--ink); border-radius:14px;
+    padding:4px; box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .zoom-controls button{
+    width:30px; height:30px; border:none; background:transparent;
+    border-radius:10px; cursor:pointer; font-size:18px;
+    font-family:inherit;
+  }
+  .zoom-controls .zoom-label{
+    display:flex; align-items:center; padding:0 10px;
+    font-size:13px;
+  }
+  .anim-legend{
+    margin-left:auto; display:flex; gap:18px;
+    padding:6px 14px; background:#fff;
+    border:2px solid var(--ink); border-radius:14px;
+    font-size:12px;
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .anim-legend .item{display:flex; align-items:center; gap:6px}
+
+  /* === 右栏：节点详情 === */
+  aside.detail{
+    grid-row:2; grid-column:3;
+    border-left:2px dashed var(--ink);
+    background:rgba(253,248,234,0.6);
+    overflow:auto;
+    padding:14px 14px;
+  }
+  .detail-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:8px 14px; margin-bottom:14px;
+    background:#fff; border:2px solid var(--ink); border-radius:16px;
+    font-size:16px; font-weight:600;
+    transform:rotate(0.5deg);
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .panel{
+    background:#fff; border:2px solid var(--ink); border-radius:16px;
+    padding:12px 14px; margin-bottom:12px;
+    box-shadow: 2px 3px 0 var(--ink-soft);
+  }
+  .panel:nth-child(2n){transform:rotate(-0.3deg)}
+  .panel:nth-child(2n+1){transform:rotate(0.2deg)}
+  .panel h3{
+    margin:0 0 8px 0; font-size:13px; font-weight:600;
+    color:var(--ink-soft);
+    display:flex; align-items:center; gap:6px;
+  }
+  .panel h3 .icon{font-size:16px}
+  .row{display:flex; justify-content:space-between; padding:3px 0; font-size:13px}
+  .row .k{color:var(--ink-soft)}
+  .row .v{color:var(--ink); font-family:'Patrick Hand',ui-monospace,monospace}
+  .chip{
+    display:inline-block; padding:3px 10px;
+    border:1.5px solid var(--ink); border-radius:12px;
+    font-size:12px; font-weight:600; margin:2px 4px 2px 0;
+    background:#fff;
+  }
+  .chip.model{background:var(--chip-blue); color:#0d3c5c}
+  .chip.tool{background:var(--chip-yellow); color:#5a4416}
+  .chip.skill{background:var(--chip-pink); color:#732d4f}
+  .chip.mcp{background:var(--chip-purple); color:#3e1d6b}
+  .chip.memory{background:var(--done-bg)}
+  .chip.null{background:var(--failed-bg); color:#7a2222}
+
+  .node-id-badge{
+    display:inline-block; width:30px; height:30px;
+    border:2px solid var(--ink); border-radius:50%;
+    background:var(--accent); color:#fff;
+    text-align:center; line-height:26px;
+    font-weight:bold; font-size:15px;
+    margin-right:8px;
+  }
+  .node-name-line{display:flex; align-items:center; margin-bottom:6px}
+  .node-name-line .nm{flex:1; font-size:16px; font-weight:600}
+  .node-name-line .en{font-size:11px; color:var(--ink-soft); margin-left:6px}
+
+  .log-line{
+    display:flex; gap:8px; padding:4px 0;
+    font-size:12px; color:var(--ink-soft);
+    border-bottom:1px dotted var(--paper-line);
+  }
+  .log-line:last-child{border-bottom:none}
+  .log-line .t{width:62px; font-family:'Patrick Hand',ui-monospace,monospace}
+  .log-line .d{flex:1}
+  .log-line .led{width:8px; height:8px; border-radius:50%; margin-top:5px}
+  .log-line .led.ok{background:var(--done)}
+  .log-line .led.err{background:var(--failed)}
+
+  .empty{padding:30px 16px; text-align:center; color:var(--ink-soft); font-style:italic}
+
+  /* === 画布节点（rough.js + foreignObject 内嵌 HTML）=== */
+  .node-group{cursor:pointer}
+  .node-label{
+    width:100%; height:100%; pointer-events:none;
+    text-align:center;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    padding:6px;
+  }
+  .node-label .num{
+    display:inline-block; width:24px; height:24px;
+    border:2px solid var(--ink); border-radius:50%;
+    background:#fff; color:var(--ink);
+    line-height:20px; font-size:13px; font-weight:bold;
+    margin-bottom:3px;
+    box-shadow: 1px 2px 0 var(--ink-soft);
+  }
+  .node-label .icon{font-size:18px; display:block; line-height:1; margin-bottom:2px}
+  .node-label .title{font-size:14px; font-weight:600; line-height:1.15; color:var(--ink)}
+  .node-label .substatus{
+    font-size:11px; margin-top:3px; padding:1px 8px;
+    border-radius:9px; border:1.5px solid var(--ink);
+    background:#fff; display:inline-block;
+  }
+  .node-label .substatus.running{background:var(--running-bg)}
+  .node-label .substatus.done{background:var(--done-bg)}
+  .node-label .substatus.failed{background:var(--failed-bg)}
+  .node-label .substatus.pending{background:var(--pending-bg)}
+  .node-label .substatus.skipped{background:var(--skipped-bg)}
+
+  /* 画布容器允许滚动；zoom 通过 transform 控 */
+  main.canvas-wrap{overflow:auto}
+  #svg-stage{
+    position:relative;
+    transform-origin: top left;
+    transition: transform .25s ease-out;
+  }
+
+  /* 装饰元素：手绘云朵 / 星星 / 烟花 */
+  .decor{position:absolute; pointer-events:none; z-index:1; opacity:0.6}
+
+  /* GSAP 入场动画初始态 */
+  .node-group{opacity:0}
+  .edge-path{opacity:0}
+
+  /* running 呼吸光晕 */
+  .node-group.running .node-shape{filter: drop-shadow(0 0 8px var(--running))}
+  .node-group.done .node-shape{filter: drop-shadow(0 0 4px var(--done))}
+  .node-group.failed .node-shape{filter: drop-shadow(0 0 6px var(--failed))}
 </style>
 </head>
 <body>
 <div class="layout">
-  <aside>
-    <header>任务列表</header>
-    <div id="task-list" class="task-list"></div>
+  <!-- 顶栏 -->
+  <header class="top">
+    <div class="brand"><span class="logo">☁️</span>多 Agent 协作运行时</div>
+    <div class="task-header">
+      <span class="star">⭐</span>
+      <span class="name" id="task-name">未选择任务</span>
+      <span id="task-status" class="status-badge pending"><span class="dot"></span><span id="task-status-text">未开始</span></span>
+    </div>
+    <div class="top-tools">
+      <button title="通知">🔔</button>
+      <button title="设置">⚙️</button>
+      <button class="overview" title="运行总览">📊 运行总览</button>
+    </div>
+  </header>
+
+  <!-- 左栏：任务列表 -->
+  <aside class="tasks">
+    <div class="tasks-head">📋 任务列表 <span class="add">+</span></div>
+    <div id="task-list"></div>
+    <div class="tasks-footer">
+      <span id="task-count">共 0 个任务</span>
+      <span>全部 ▾</span>
+    </div>
   </aside>
 
-  <main>
-    <div class="topbar">
-      <h2 id="task-title">未选择任务</h2>
-      <span class="meta" id="task-meta"></span>
-      <span class="poll"><span class="dot"></span><span id="poll-text">轮询中…</span></span>
+  <!-- 中央画布 -->
+  <main class="canvas-wrap">
+    <div class="canvas-toolbar">
+      <div class="tool-group">
+        <button class="tool" title="抓手">✋</button>
+        <button class="tool active" title="选择">🔘</button>
+        <button class="tool" title="方框">▢</button>
+        <button class="tool" title="线条">／</button>
+        <button class="tool" title="文本">T</button>
+        <button class="tool" title="便签">📝</button>
+      </div>
+      <button class="layout-btn">布局 ▾</button>
+      <button class="clear-btn">清空画布</button>
+      <div class="legend">
+        <span class="item"><span class="sw" style="background:var(--done)"></span>已完成</span>
+        <span class="item"><span class="sw" style="background:var(--running)"></span>运行中</span>
+        <span class="item"><span class="sw" style="background:var(--retry)"></span>重试中</span>
+        <span class="item"><span class="sw" style="background:var(--pending)"></span>等待中</span>
+        <span class="item"><span class="sw" style="background:var(--skipped)"></span>跳过</span>
+      </div>
+      <div class="minimap"><svg id="minimap-svg" width="100%" height="100%"></svg></div>
     </div>
-    <div class="stage">
-      <div id="graph"></div>
+
+    <div id="svg-stage">
+      <svg id="canvas-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="decor-layer" style="position:absolute; inset:0; pointer-events:none"></div>
     </div>
-    <div class="legend">
-      <span class="l"><span class="swatch" style="background:var(--wait)"></span>pending</span>
-      <span class="l"><span class="swatch" style="background:var(--run)"></span>running</span>
-      <span class="l"><span class="swatch" style="background:var(--done)"></span>done</span>
-      <span class="l"><span class="swatch" style="background:var(--fail)"></span>failed</span>
-      <span class="l"><span class="swatch" style="background:var(--skip)"></span>skipped</span>
+
+    <div class="canvas-footer">
+      <div class="zoom-controls">
+        <button id="zoom-out">−</button>
+        <span class="zoom-label" id="zoom-label">100%</span>
+        <button id="zoom-in">+</button>
+        <button id="zoom-fit">⌖</button>
+        <button id="zoom-lock">🔒</button>
+      </div>
+      <div class="anim-legend">
+        <span class="item">🟢 数据流动（动画效果）</span>
+        <span class="item">🌀 运行中（脉冲效果）</span>
+        <span class="item">🎉 任务完成（庆祝效果）</span>
+      </div>
     </div>
   </main>
 
-  <section class="right">
-    <header>节点详情</header>
-    <div id="node-detail"><div class="empty">点击图中节点查看详情</div></div>
-  </section>
+  <!-- 右栏：节点详情 -->
+  <aside class="detail">
+    <div class="detail-head">📌 节点详情 <span style="font-size:18px">📍</span></div>
+    <div id="detail-body"><div class="empty">点击图中节点查看详情</div></div>
+  </aside>
 </div>
 
 <script>
+/* ============================================================
+ * multi_agent dashboard · 蜡笔小新风 + GSAP + rough.js
+ * ============================================================ */
+
 const POLL_MS = 1500;
+const TASKS_POLL_MS = 5000;
 
 let currentTaskId = null;
-let cy = null;
-let lastStatusHash = {};
+let prevSnapshot = {};   // node_id → status，用于 diff 触发动画
+let cyData = null;
+
+const svg = document.getElementById('canvas-svg');
+const decorLayer = document.getElementById('decor-layer');
+const svgStage = document.getElementById('svg-stage');
+let rc = rough.svg(svg);
+let canvasZoom = 1.0;
+
+// 状态色映射（hex 字面量；rough.js 不解析 CSS 变量）
+const STATUS_COLOR = {
+  pending: { fill: '#f3eed7', stroke: '#bdb6a6', label: '等待中' },
+  running: { fill: '#dbe7fb', stroke: '#62a3ff', label: '运行中' },
+  done:    { fill: '#e0f1da', stroke: '#86c98a', label: '已完成' },
+  failed:  { fill: '#fbdedc', stroke: '#ee7373', label: '失败'   },
+  skipped: { fill: '#ebe7df', stroke: '#a8a8a8', label: '跳过'   },
+};
+
+// 节点角色 → 图标
+function iconForName(name) {
+  const n = name.toLowerCase();
+  if (n.includes('research')) return '🔍';
+  if (n.includes('writing') || n.includes('write')) return '✍️';
+  if (n.includes('summar')) return '📊';
+  if (n.includes('review')) return '🔬';
+  if (n.includes('plan')) return '📋';
+  if (n.includes('client')) return '👤';
+  if (n.includes('tech')) return '⚙️';
+  if (n.includes('save') || n.includes('file')) return '💾';
+  if (n.includes('rag')) return '🗄️';
+  if (n.includes('agent')) return '🤖';
+  if (n.includes('analysis')) return '📈';
+  if (n.includes('matrix')) return '🧮';
+  if (n.includes('recommendation') || n.includes('selection')) return '🎯';
+  if (n.includes('quality') || n.includes('eval')) return '🛡️';
+  return '📝';
+}
+
+// 中文节点名兜底
+function displayName(name) {
+  const map = {
+    research: '调研',
+    research_a: '调研 A',
+    research_b: '调研 B',
+    research_c: '调研 C',
+    research_milvus: 'Milvus 调研',
+    research_qdrant: 'Qdrant 调研',
+    research_chroma: 'Chroma 调研',
+    writing: '写作',
+    writing_a: '写作 A',
+    writing_b: '写作 B',
+    summarize: '汇总报告',
+    summary: '汇总报告',
+    summarization: '汇总报告',
+    summarize_research: '汇总报告',
+    summarize_results: '汇总报告',
+    reviewer: '评审',
+    review: '评审',
+    planner: '规划',
+    overall_trend_research: '趋势调研',
+    inference_framework_research: '推理框架',
+    rag_framework_research: 'RAG 框架',
+    agent_orchestration_framework_research: '编排框架',
+    vector_database_research: '向量数据库',
+    model_service_platform_research: '模型平台',
+    api_price_comparison: '价格对比',
+    integrated_trend_analysis: '趋势分析',
+    integrated_tool_matrix: '工具矩阵',
+    final_selection_recommendation: '最终选型',
+    write_introduction: '撰写介绍',
+    save_to_file: '保存文件',
+    client_manager: '客户经理',
+    tech_expert: '技术专家',
+    comparison_and_recommendation: '对比与建议',
+  };
+  return map[name] || name;
+}
 
 async function fetchJSON(url) {
   const r = await fetch(url);
@@ -105,250 +559,542 @@ async function fetchJSON(url) {
   return await r.json();
 }
 
+/* === 任务列表 === */
 async function refreshTaskList() {
   try {
     const tasks = await fetchJSON('/api/tasks');
     const list = document.getElementById('task-list');
     list.innerHTML = '';
     tasks.forEach(t => {
-      const div = document.createElement('div');
-      div.className = 'task-item' + (t.id === currentTaskId ? ' active' : '');
-      div.innerHTML = `
-        <div class="task-title">${escapeHtml(t.title)}</div>
-        <div class="task-meta">
-          <span class="status-pill ${t.status}">${t.status}</span>
-          ${escapeHtml(t.dag_id)} · ${formatDate(t.created_at)}
+      const card = document.createElement('div');
+      card.className = 'task-card' + (t.id === currentTaskId ? ' active' : '');
+      card.innerHTML = `
+        <div class="title">${escapeHtml(t.title)}</div>
+        <div class="meta">
+          <span class="pill ${t.status}">${statusZh(t.status)}</span>
+          <span>${formatDate(t.created_at)}</span>
         </div>`;
-      div.onclick = () => selectTask(t.id);
-      list.appendChild(div);
+      card.onclick = () => selectTask(t.id);
+      list.appendChild(card);
     });
+    document.getElementById('task-count').textContent = `共 ${tasks.length} 个任务`;
     if (!currentTaskId && tasks.length > 0) selectTask(tasks[0].id);
   } catch (e) {
-    console.warn('refresh task list failed', e);
+    console.warn('refresh task list', e);
   }
+}
+
+function statusZh(s) {
+  return ({pending:'等待中', running:'运行中', done:'已完成', failed:'失败', skipped:'跳过'})[s] || s;
 }
 
 function selectTask(tid) {
   currentTaskId = tid;
-  lastStatusHash = {};
-  document.querySelectorAll('.task-item').forEach(el => el.classList.remove('active'));
-  document.querySelector('#node-detail').innerHTML =
-    '<div class="empty">点击图中节点查看详情</div>';
+  prevSnapshot = {};
+  cyData = null;
   refreshTaskList();
+  document.getElementById('detail-body').innerHTML =
+    '<div class="empty">点击图中节点查看详情</div>';
   refreshDag(true);
 }
 
+/* === DAG 拉取 + 渲染 + 动画 === */
 async function refreshDag(forceRebuild) {
   if (!currentTaskId) return;
   try {
     const data = await fetchJSON(`/api/dag-status?task_id=${currentTaskId}`);
-    document.getElementById('task-title').textContent = data.task.title;
-    document.getElementById('task-meta').textContent =
-      ` · ${data.task.dag_id} · ${data.task.status}`;
+    document.getElementById('task-name').textContent = data.task.title;
+    const tStatus = data.task.status;
+    const badge = document.getElementById('task-status');
+    badge.className = `status-badge ${tStatus}`;
+    document.getElementById('task-status-text').textContent = statusZh(tStatus);
 
-    const hashNow = nodesHash(data.nodes);
-    const sameTopology = JSON.stringify(Object.keys(hashNow).sort()) ===
-                         JSON.stringify(Object.keys(lastStatusHash).sort());
+    const topologyChanged = !cyData ||
+      JSON.stringify(cyData.nodes.map(n=>n.id).sort()) !==
+      JSON.stringify(data.nodes.map(n=>n.id).sort());
 
-    if (forceRebuild || !sameTopology || !cy) {
-      renderGraph(data.nodes);
+    if (forceRebuild || topologyChanged) {
+      cyData = data;
+      renderDag(data);
     } else {
-      updateStatuses(data.nodes);
+      cyData = data;
+      diffAndAnimate(data);
     }
-    lastStatusHash = hashNow;
-    document.getElementById('poll-text').textContent =
-      `轮询中… ${new Date().toLocaleTimeString()}`;
   } catch (e) {
-    console.warn('refresh dag failed', e);
-    document.getElementById('poll-text').textContent = `轮询失败：${e.message}`;
+    console.warn('refresh dag', e);
   }
 }
 
-function nodesHash(nodes) {
-  const h = {};
-  nodes.forEach(n => h[n.id] = n.status + '|' + n.retry_count);
-  return h;
-}
+function renderDag(data) {
+  svg.innerHTML = '';
+  decorLayer.innerHTML = '';
+  prevSnapshot = {};
 
-function renderGraph(nodes) {
-  const elements = [];
-  const idSet = new Set(nodes.map(n => n.id));
-  const doneSet = new Set(nodes.filter(n => n.status === 'done').map(n => n.id));
-  nodes.forEach(n => {
-    elements.push({
-      data: {
-        id: n.id, label: n.name,
-        status: n.status,
-        model: n.model_name || '',
-        tools: (n.tools || []).join(','),
-        retry: n.retry_count, policy: n.failure_policy,
-        raw: n,
-      }
-    });
-  });
-  nodes.forEach(n => {
+  if (!data.nodes || data.nodes.length === 0) {
+    svg.setAttribute('width', '0');
+    svg.setAttribute('height', '0');
+    return;
+  }
+
+  /* dagre 布局 */
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: 'LR', nodesep: 60, ranksep: 120, marginx: 80, marginy: 80 });
+  g.setDefaultEdgeLabel(() => ({}));
+  const NODE_W = 200, NODE_H = 110;
+  data.nodes.forEach(n => g.setNode(n.id, { width: NODE_W, height: NODE_H }));
+  data.nodes.forEach(n => (n.deps || []).forEach(dep => {
+    if (data.nodes.find(x => x.id === dep)) g.setEdge(dep, n.id);
+  }));
+  dagre.layout(g);
+
+  const graph = g.graph();
+  const W = graph.width;
+  const H = graph.height;
+  // 直接用像素坐标，不用 viewBox 缩放
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  decorLayer.style.width = W + 'px';
+  decorLayer.style.height = H + 'px';
+
+  /* 装饰：随机散点云、星、烟花 */
+  addDecorations(W, H);
+
+  /* 画边 */
+  data.nodes.forEach(n => {
     (n.deps || []).forEach(dep => {
-      if (idSet.has(dep)) {
-        elements.push({
-          data: {
-            id: `${dep}->${n.id}`, source: dep, target: n.id,
-            sourceDone: doneSet.has(dep),
-          },
-        });
-      }
+      if (!data.nodes.find(x => x.id === dep)) return;
+      const e = g.edge(dep, n.id);
+      if (!e || !e.points) return;
+      const dStr = pointsToPath(e.points);
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', dStr);
+      path.setAttribute('fill', 'none');
+      path.setAttribute('stroke', '#3a3026');
+      path.setAttribute('stroke-width', '2');
+      path.setAttribute('stroke-dasharray', '5,4');
+      path.classList.add('edge-path');
+      path.dataset.from = dep;
+      path.dataset.to = n.id;
+      svg.appendChild(path);
+
+      const arrow = makeArrow(e.points[e.points.length-1], e.points[e.points.length-2]);
+      arrow.classList.add('edge-arrow');
+      arrow.dataset.from = dep;
+      arrow.dataset.to = n.id;
+      svg.appendChild(arrow);
     });
   });
 
-  if (cy) cy.destroy();
-  cy = cytoscape({
-    container: document.getElementById('graph'),
-    elements,
-    style: [
-      { selector: 'node', style: {
-        'shape': 'round-rectangle',
-        'width': 180, 'height': 64,
-        'border-width': 2, 'border-color': '#30363d',
-        'label': 'data(label)',
-        'color': '#e6edf3', 'text-valign': 'center', 'text-halign': 'center',
-        'font-size': 13, 'font-weight': 600,
-        'text-wrap': 'wrap', 'text-max-width': 160,
-      }},
-      { selector: 'node[status = "pending"]', style: { 'background-color': '#30363d', 'color': '#8b949e' }},
-      { selector: 'node[status = "running"]', style: { 'background-color': '#1f6feb', 'border-color': '#79c0ff' }},
-      { selector: 'node[status = "done"]',    style: { 'background-color': '#238636', 'border-color': '#3fb950' }},
-      { selector: 'node[status = "failed"]',  style: { 'background-color': '#da3633', 'border-color': '#ff7b72' }},
-      { selector: 'node[status = "skipped"]', style: { 'background-color': '#484f58', 'color': '#c9d1d9', 'border-style': 'dashed' }},
-      { selector: 'edge', style: {
-        'curve-style': 'bezier',
-        'target-arrow-shape': 'triangle',
-        'line-color': '#30363d', 'target-arrow-color': '#30363d',
-        'width': 2,
-      }},
-      { selector: 'edge[?sourceDone]', style: { 'line-color': '#3fb950', 'target-arrow-color': '#3fb950' }},
-    ],
-    layout: {
-      name: 'dagre', rankDir: 'LR',
-      nodeSep: 40, rankSep: 80, edgeSep: 20,
-    },
-    minZoom: 0.3, maxZoom: 2.0,
+  /* 画节点：rough rectangle + 内嵌 foreignObject 标签（统一坐标系，永不错位）*/
+  data.nodes.forEach((n, idx) => {
+    const pos = g.node(n.id);
+    const x = pos.x - pos.width / 2;
+    const y = pos.y - pos.height / 2;
+    const color = STATUS_COLOR[n.status] || STATUS_COLOR.pending;
+
+    const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    group.classList.add('node-group', n.status);
+    group.dataset.nodeId = n.id;
+    group.style.cursor = 'pointer';
+
+    const rectNode = rc.rectangle(x, y, pos.width, pos.height, {
+      fill: color.fill,
+      fillStyle: 'solid',
+      stroke: color.stroke,
+      strokeWidth: 3,
+      roughness: 1.5,
+      fillWeight: 1.5,
+    });
+    rectNode.classList.add('node-shape');
+    group.appendChild(rectNode);
+
+    // foreignObject 内嵌 HTML 标签 —— 跟节点矩形共用 SVG 坐标，永不偏移
+    const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
+    fo.setAttribute('x', x);
+    fo.setAttribute('y', y);
+    fo.setAttribute('width', pos.width);
+    fo.setAttribute('height', pos.height);
+    fo.style.pointerEvents = 'none';
+    fo.innerHTML = `
+      <div class="node-label" xmlns="http://www.w3.org/1999/xhtml">
+        <div class="num">${idx + 1}</div>
+        <div class="icon">${iconForName(n.name)}</div>
+        <div class="title">${escapeHtml(displayName(n.name))}</div>
+        <div class="substatus ${n.status}" data-substatus>${statusZh(n.status)}${n.retry_count > 0 ? ' · 重试 ' + n.retry_count : ''}</div>
+      </div>
+    `;
+    group.appendChild(fo);
+
+    group.addEventListener('click', () => showNodeDetail(n));
+    svg.appendChild(group);
+
+    prevSnapshot[n.id] = n.status;
   });
 
-  cy.on('tap', 'node', (evt) => showNodeDetail(evt.target.data('raw')));
+  /* GSAP 入场动画：节点逐个画出 + 边逐个出现 */
+  const tl = gsap.timeline();
+  tl.from('.node-group', {
+    scale: 0,
+    opacity: 0,
+    transformOrigin: 'center center',
+    duration: 0.5,
+    stagger: 0.08,
+    ease: 'back.out(1.7)',
+  });
+  tl.to('.edge-path', { opacity: 1, duration: 0.4, stagger: 0.04 }, '-=0.3');
+  tl.to('.edge-arrow', { opacity: 1, duration: 0.3, stagger: 0.04 }, '<');
+
+  // 入场后给 running 节点开始呼吸
+  setTimeout(() => {
+    document.querySelectorAll('.node-group.running').forEach(startBreathing);
+    document.querySelectorAll('.node-group.done').forEach(addDoneSparkle);
+  }, 500 + data.nodes.length * 80);
 }
 
-function updateStatuses(nodes) {
-  if (!cy) return;
-  const doneSet = new Set(nodes.filter(n => n.status === 'done').map(n => n.id));
-  nodes.forEach(n => {
-    const node = cy.getElementById(n.id);
-    if (node) {
-      node.data('status', n.status);
-      node.data('retry', n.retry_count);
-      node.data('raw', n);
+function pointsToPath(points) {
+  if (!points || points.length === 0) return '';
+  if (points.length === 1) return `M ${points[0].x},${points[0].y}`;
+  let s = `M ${points[0].x},${points[0].y}`;
+  // 用二次贝塞尔平滑
+  for (let i = 1; i < points.length; i++) {
+    s += ` L ${points[i].x},${points[i].y}`;
+  }
+  return s;
+}
+
+function makeArrow(p1, p0) {
+  const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  const dx = p1.x - p0.x;
+  const dy = p1.y - p0.y;
+  const ang = Math.atan2(dy, dx);
+  const len = 10;
+  const w = 6;
+  const x1 = p1.x - len * Math.cos(ang) + w * Math.cos(ang + Math.PI/2);
+  const y1 = p1.y - len * Math.sin(ang) + w * Math.sin(ang + Math.PI/2);
+  const x2 = p1.x - len * Math.cos(ang) - w * Math.cos(ang + Math.PI/2);
+  const y2 = p1.y - len * Math.sin(ang) - w * Math.sin(ang + Math.PI/2);
+  arrow.setAttribute('d', `M ${p1.x},${p1.y} L ${x1},${y1} L ${x2},${y2} Z`);
+  arrow.setAttribute('fill', '#3a3026');
+  arrow.style.opacity = 0;
+  return arrow;
+}
+
+function cssVar(v) {
+  if (!v.startsWith('var(')) return v;
+  const name = v.slice(4, -1).trim();
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/* === GSAP 动画效果 === */
+const breathingMap = new WeakMap();
+function startBreathing(group) {
+  if (breathingMap.has(group)) return;
+  const shape = group.querySelector('.node-shape');
+  if (!shape) return;
+  const tween = gsap.to(shape, {
+    scale: 1.04, transformOrigin: 'center center',
+    duration: 0.9, yoyo: true, repeat: -1, ease: 'sine.inOut',
+  });
+  breathingMap.set(group, tween);
+}
+function stopBreathing(group) {
+  const t = breathingMap.get(group);
+  if (t) { t.kill(); breathingMap.delete(group); }
+  const shape = group.querySelector('.node-shape');
+  if (shape) gsap.set(shape, { scale: 1 });
+}
+
+function addDoneSparkle(group) {
+  const rect = group.getBoundingClientRect();
+  const containerRect = document.querySelector('main.canvas-wrap').getBoundingClientRect();
+  // 烟花粒子 8 个
+  for (let i = 0; i < 8; i++) {
+    const spark = document.createElement('div');
+    const angle = (i / 8) * Math.PI * 2;
+    const color = ['#86c98a', '#f7d774', '#7ccaf2', '#f7a8c4'][i % 4];
+    spark.style.cssText = `
+      position:absolute; left:${rect.left - containerRect.left + rect.width/2}px;
+      top:${rect.top - containerRect.top + rect.height/2}px;
+      width:6px; height:6px; border-radius:50%;
+      background:${color}; pointer-events:none; z-index:10;
+    `;
+    document.querySelector('main.canvas-wrap').appendChild(spark);
+    gsap.to(spark, {
+      x: Math.cos(angle) * 55, y: Math.sin(angle) * 55,
+      opacity: 0, scale: 0.3,
+      duration: 0.9, ease: 'power2.out',
+      onComplete: () => spark.remove(),
+    });
+  }
+}
+
+function shakeFailed(group) {
+  gsap.fromTo(group, { x: -4 }, {
+    x: 4, duration: 0.08, repeat: 5, yoyo: true, ease: 'sine.inOut',
+    onComplete: () => gsap.set(group, { x: 0 }),
+  });
+}
+
+function animateEdgesFlow(fromNodeId) {
+  document.querySelectorAll(`.edge-path[data-from="${fromNodeId}"]`).forEach(path => {
+    path.setAttribute('stroke', '#86c98a');
+    const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('r', '5');
+    dot.setAttribute('fill', '#86c98a');
+    svg.appendChild(dot);
+    gsap.to(dot, {
+      duration: 1.6,
+      motionPath: { path: path, align: path, alignOrigin: [0.5, 0.5] },
+      ease: 'power2.inOut',
+      onComplete: () => dot.remove(),
+    });
+  });
+}
+
+function diffAndAnimate(data) {
+  data.nodes.forEach((n, idx) => {
+    const group = svg.querySelector(`.node-group[data-node-id="${n.id}"]`);
+    if (!group) return;
+    const prev = prevSnapshot[n.id];
+    if (prev !== n.status) {
+      const oldShape = group.querySelector('.node-shape');
+      if (oldShape) {
+        const fo = group.querySelector('foreignObject');
+        const x = +fo.getAttribute('x');
+        const y = +fo.getAttribute('y');
+        const w = +fo.getAttribute('width');
+        const h = +fo.getAttribute('height');
+        const color = STATUS_COLOR[n.status] || STATUS_COLOR.pending;
+        group.classList.remove(prev || '');
+        group.classList.add(n.status);
+        const newShape = rc.rectangle(x, y, w, h, {
+          fill: color.fill, fillStyle: 'solid',
+          stroke: color.stroke, strokeWidth: 3,
+          roughness: 1.5, fillWeight: 1.5,
+        });
+        newShape.classList.add('node-shape');
+        group.replaceChild(newShape, oldShape);
+      }
+
+      if (n.status === 'running') startBreathing(group);
+      else stopBreathing(group);
+      if (n.status === 'done') {
+        addDoneSparkle(group);
+        animateEdgesFlow(n.id);
+      }
+      if (n.status === 'failed') shakeFailed(group);
+      prevSnapshot[n.id] = n.status;
+    }
+
+    // 更新 substatus 文字 + 颜色
+    const sub = group.querySelector('[data-substatus]');
+    if (sub) {
+      sub.className = `substatus ${n.status}`;
+      sub.textContent = statusZh(n.status) +
+        (n.retry_count > 0 ? ' · 重试 ' + n.retry_count : '');
     }
   });
-  // 让边随上游 done 变绿（spec §11.2「边色随上游 done 变绿」）
-  cy.edges().forEach(edge => {
-    edge.data('sourceDone', doneSet.has(edge.data('source')));
-  });
 }
 
+/* === 装饰元素（云朵 + 星 + 涂鸦）=== */
+function addDecorations(width, height) {
+  // 顶部云朵
+  for (let i = 0; i < 3; i++) {
+    const c = document.createElement('div');
+    c.className = 'decor';
+    c.style.cssText = `top:${10 + Math.random()*40}px; left:${100 + i * 280}px; font-size:32px; transform:rotate(${(Math.random()-0.5)*30}deg)`;
+    c.textContent = '☁️';
+    decorLayer.appendChild(c);
+  }
+  // 角落星星
+  ['⭐', '✨', '🌟'].forEach((s, i) => {
+    const c = document.createElement('div');
+    c.className = 'decor';
+    c.style.cssText = `bottom:${60 + i*40}px; right:${30 + i*60}px; font-size:${20 + i*4}px; transform:rotate(${i*20}deg)`;
+    c.textContent = s;
+    decorLayer.appendChild(c);
+  });
+  // 彩纸/烟花碎屑
+  for (let i = 0; i < 5; i++) {
+    const c = document.createElement('div');
+    c.className = 'decor';
+    c.style.cssText = `top:${100 + Math.random()*40}px; left:${180 + i*40}px; font-size:14px; transform:rotate(${i*30}deg)`;
+    c.textContent = '🎉';
+    decorLayer.appendChild(c);
+  }
+}
+
+/* === 右栏节点详情 === */
 function showNodeDetail(n) {
   const harness = n.harness || {};
-  const input_mids = (n.input_memory_ids || []).map(
-    m => m ? `<div class="chip">${escapeHtml(m)}</div>` : '<div class="chip" style="background:#3d2c2c">null（上游跳过）</div>'
-  ).join('') || '<span class="row">（无）</span>';
+  const idx = (cyData?.nodes || []).findIndex(x => x.id === n.id) + 1;
 
   const modelChip = harness.model
     ? `<span class="chip model">${escapeHtml(harness.model)}</span>` +
-      (harness.provider ? `<span class="chip" style="background:#3d2c2c;color:#ffa657">${escapeHtml(harness.provider)}</span>` : '')
-    : '<span class="row" style="color:var(--muted)">（默认 provider/model）</span>';
+      (harness.provider ? ` <span class="chip" style="background:#3a3026; color:#fff">${escapeHtml(harness.provider)}</span>` : '')
+    : '<span style="color:var(--ink-soft)">（默认 provider/model）</span>';
 
-  const tools = (harness.tools || []).map(t =>
+  const toolChips = (harness.tools || []).map(t =>
     `<span class="chip tool" title="${escapeHtml(t.description || '')}">${escapeHtml(t.name)}</span>`
-  ).join('') || '<span class="row" style="color:var(--muted)">（无）</span>';
+  ).join('') || '<span style="color:var(--ink-soft)">（无）</span>';
 
-  const skills = (harness.skills || []).map(s =>
-    `<span class="chip" style="background:#2d2517;color:#f0c674" title="${escapeHtml(s.description || '')}">${escapeHtml(s.name)}</span>`
-  ).join('') || '<span class="row" style="color:var(--muted)">（无）</span>';
+  const skillChips = (harness.skills || []).map(s =>
+    `<span class="chip skill" title="${escapeHtml(s.description || '')}">${escapeHtml(s.name)}</span>`
+  ).join('') || '<span style="color:var(--ink-soft)">（无）</span>';
 
-  const mcps = (harness.mcp_servers || []).map(m => {
+  const mcpChips = (harness.mcp_servers || []).map(m => {
     const cmd = [m.command, ...(m.args || [])].filter(Boolean).join(' ');
-    return `<div class="chip" style="background:#172d2d;color:#7ee7d8;display:block;margin:4px 0;font-size:11px">
-      <strong>${escapeHtml(m.name)}</strong>${cmd ? ' · ' + escapeHtml(cmd) : ''}
-    </div>`;
-  }).join('') || '<span class="row" style="color:var(--muted)">（无）</span>';
+    return `<div class="chip mcp" title="${escapeHtml(cmd)}">${escapeHtml(m.name)}</div>`;
+  }).join('') || '<span style="color:var(--ink-soft)">（无）</span>';
 
-  const sysPrompt = harness.system_prompt
-    ? `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--muted);font-size:11px">查看 system prompt</summary>
-       <pre style="white-space:pre-wrap;font-size:11px;color:#c9d1d9;background:#0d1117;padding:8px;border-radius:4px;margin-top:6px">${escapeHtml(harness.system_prompt)}</pre>
-       </details>`
-    : '<span class="row" style="color:var(--muted)">（节点未覆盖默认 system prompt）</span>';
+  const handoff = harness.handoff
+    ? `<div class="row"><span class="k">from_node</span><span class="v">${escapeHtml(harness.handoff.from_node)}</span></div>
+       <div class="row"><span class="k">turn_range</span><span class="v">${harness.handoff.turn_range ? harness.handoff.turn_range.join(' - ') : '全部'}</span></div>`
+    : '<span style="color:var(--ink-soft)">（无节点级接力）</span>';
 
-  document.getElementById('node-detail').innerHTML = `
+  const memChips = (n.input_memory_ids || []).map(m =>
+    m ? `<div class="chip memory">${escapeHtml(m.slice(0, 14))}...</div>`
+      : '<div class="chip null">null（上游跳过）</div>'
+  ).join('') || '<span style="color:var(--ink-soft)">（无）</span>';
+
+  const startedAt = n.started_at ? new Date(n.started_at).toLocaleString() : '—';
+  const finishedAt = n.finished_at ? new Date(n.finished_at).toLocaleString() : '—';
+  const duration = (n.started_at && n.finished_at)
+    ? formatDuration(new Date(n.finished_at) - new Date(n.started_at))
+    : (n.started_at ? '运行中...' : '—');
+
+  // 简易"日志"区：把节点的关键事件拼出来
+  const log = buildNodeLog(n);
+
+  document.getElementById('detail-body').innerHTML = `
     <div class="panel">
-      <h3>节点</h3>
-      <div class="row"><span class="k">name</span><span class="v">${escapeHtml(n.name)}</span></div>
-      <div class="row"><span class="k">id</span><span class="v">${escapeHtml(n.id)}</span></div>
-      <div class="row"><span class="k">status</span><span class="v"><span class="status-pill ${n.status}">${n.status}</span></span></div>
-      <div class="row"><span class="k">policy</span><span class="v">${escapeHtml(n.failure_policy)}</span></div>
+      <div class="node-name-line">
+        <span class="node-id-badge">${idx}</span>
+        <div class="nm">${escapeHtml(displayName(n.name))} <span class="en">(${escapeHtml(n.name)})</span></div>
+        <span class="status-badge ${n.status}" style="padding:3px 8px"><span class="dot"></span>${statusZh(n.status)}</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3><span class="icon">🤖</span> 模型信息</h3>
+      ${modelChip}
+      <div class="row" style="margin-top:6px"><span class="k">policy</span><span class="v">${escapeHtml(n.failure_policy)}</span></div>
       <div class="row"><span class="k">retry</span><span class="v">${n.retry_count} / ${n.max_retries}</span></div>
       <div class="row"><span class="k">memory_level</span><span class="v">${escapeHtml(n.memory_level)}</span></div>
     </div>
-
     <div class="panel">
-      <h3>Harness · 模型</h3>
-      ${modelChip}
+      <h3><span class="icon">🔧</span> 工具链 (${(harness.tools || []).length})</h3>
+      ${toolChips}
     </div>
     <div class="panel">
-      <h3>Harness · 工具 (${(harness.tools || []).length})</h3>
-      ${tools}
+      <h3><span class="icon">🎓</span> 技能 (${(harness.skills || []).length})</h3>
+      ${skillChips}
     </div>
     <div class="panel">
-      <h3>Harness · 技能 (${(harness.skills || []).length})</h3>
-      ${skills}
+      <h3><span class="icon">🔌</span> MCP servers (${(harness.mcp_servers || []).length})</h3>
+      ${mcpChips}
     </div>
     <div class="panel">
-      <h3>Harness · MCP servers (${(harness.mcp_servers || []).length})</h3>
-      ${mcps}
+      <h3><span class="icon">🔗</span> 节点级接力 (v6)</h3>
+      ${handoff}
     </div>
     <div class="panel">
-      <h3>Harness · System Prompt</h3>
-      ${sysPrompt}
-    </div>
-
-    <div class="panel">
-      <h3>运行时</h3>
-      <div class="row"><span class="k">worker_id</span><span class="v">${escapeHtml(n.worker_id || '—')}</span></div>
-      <div class="row"><span class="k">heartbeat_at</span><span class="v">${escapeHtml(n.heartbeat_at || '—')}</span></div>
-      <div class="row"><span class="k">started_at</span><span class="v">${escapeHtml(n.started_at || '—')}</span></div>
-      <div class="row"><span class="k">finished_at</span><span class="v">${escapeHtml(n.finished_at || '—')}</span></div>
+      <h3><span class="icon">🧠</span> 记忆 / 知识 (${(n.input_memory_ids || []).length})</h3>
+      ${memChips}
     </div>
     <div class="panel">
-      <h3>input_memory_ids（精确接力）</h3>
-      ${input_mids}
+      <h3><span class="icon">⏱️</span> 运行信息</h3>
+      <div class="row"><span class="k">开始时间</span><span class="v">${escapeHtml(startedAt)}</span></div>
+      <div class="row"><span class="k">完成时间</span><span class="v">${escapeHtml(finishedAt)}</span></div>
+      <div class="row"><span class="k">运行时长</span><span class="v">${escapeHtml(duration)}</span></div>
+      <div class="row"><span class="k">执行者</span><span class="v">${escapeHtml(n.worker_id || '—')}</span></div>
     </div>
     <div class="panel">
-      <h3>output_memory_id</h3>
-      <div class="row"><span class="v">${escapeHtml(n.output_memory_id || '—')}</span></div>
+      <h3><span class="icon">📜</span> 日志（最近 6 条）</h3>
+      ${log}
     </div>
   `;
 }
 
+function buildNodeLog(n) {
+  const events = [];
+  if (n.started_at) events.push({ t: n.started_at, msg: '节点拉起 Worker', ok: true });
+  if (n.heartbeat_at && n.heartbeat_at !== n.started_at)
+    events.push({ t: n.heartbeat_at, msg: '心跳上报', ok: true });
+  if (n.input_memory_ids && n.input_memory_ids.length > 0) {
+    events.push({ t: n.started_at, msg: `上游接力 ${n.input_memory_ids.filter(x=>x).length} 条记忆`, ok: true });
+  }
+  if (n.output_memory_id) {
+    events.push({ t: n.finished_at || n.started_at, msg: '记忆已写入 (mem_' + n.output_memory_id.slice(4, 12) + '...)', ok: true });
+  }
+  if (n.status === 'failed') events.push({ t: n.finished_at, msg: '节点失败', ok: false });
+  if (n.status === 'done' && n.finished_at) events.push({ t: n.finished_at, msg: '节点完成', ok: true });
+  if (n.status === 'skipped' && n.finished_at) events.push({ t: n.finished_at, msg: '节点已跳过', ok: false });
+
+  if (events.length === 0)
+    return '<div class="empty" style="padding:8px">（暂无）</div>';
+
+  return events.slice(-6).map(e => `
+    <div class="log-line">
+      <span class="led ${e.ok ? 'ok' : 'err'}"></span>
+      <span class="t">${formatTime(e.t)}</span>
+      <span class="d">${escapeHtml(e.msg)}</span>
+    </div>
+  `).join('');
+}
+
+function formatDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`;
+}
+function formatTime(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('zh-CN', { hour12: false });
+  } catch { return iso; }
+}
+function formatDate(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString('zh-CN') + ' ' + d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+  } catch { return iso; }
+}
 function escapeHtml(s) {
   if (s == null) return '';
   return String(s).replace(/[&<>"']/g, c => ({
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[c]));
 }
-function formatDate(iso) {
-  if (!iso) return '';
-  try { return new Date(iso).toLocaleString(); } catch { return iso; }
-}
 
-// 初始 + 轮询
+/* === zoom 控制 === */
+function applyZoom() {
+  svgStage.style.transform = `scale(${canvasZoom})`;
+  document.getElementById('zoom-label').textContent = Math.round(canvasZoom * 100) + '%';
+}
+document.getElementById('zoom-in').onclick = () => {
+  canvasZoom = Math.min(2.0, canvasZoom + 0.1); applyZoom();
+};
+document.getElementById('zoom-out').onclick = () => {
+  canvasZoom = Math.max(0.3, canvasZoom - 0.1); applyZoom();
+};
+document.getElementById('zoom-fit').onclick = () => {
+  if (!cyData || !cyData.nodes.length) return;
+  const rect = svg.getBoundingClientRect();
+  const containerRect = document.querySelector('main.canvas-wrap').getBoundingClientRect();
+  canvasZoom = Math.min(
+    (containerRect.width - 60) / (rect.width / canvasZoom),
+    (containerRect.height - 120) / (rect.height / canvasZoom),
+    1.0
+  );
+  applyZoom();
+};
+
+/* === 初始化 + 轮询 === */
 refreshTaskList();
-setInterval(refreshTaskList, 5000);
+setInterval(refreshTaskList, TASKS_POLL_MS);
 setInterval(() => refreshDag(false), POLL_MS);
 </script>
 </body>

@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-主线 plan §1-§5 + ABC 完整 Harness 体系 + **Planner Agent**（自然语言 → DAG）+ **v6 真协作**（多轮 transcript + 节点级接力）全部交付，**268 测试全过（~25s）**。
+主线 plan §1-§5 + ABC 完整 Harness 体系 + **Planner Agent**（自然语言 → DAG）+ **v6 真协作**（多轮 transcript + 节点级接力）+ **蜡笔小新风 UI**（GSAP + rough.js + dagre）全部交付，**268 测试全过（~25s）**。
 
 - **阶段 1（单 Agent + 记忆库）**：✅
   - `storage/transcript_store.py` SQLite 对话原文（async / `asyncio.to_thread`）

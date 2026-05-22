@@ -21,6 +21,26 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+
+def _load_dotenv_if_present() -> None:
+    """启动时自动加载项目根 ``.env``（如果存在）。
+
+    - 已存在的环境变量**不覆盖**（用户在 shell 里 ``export`` 的优先级最高）
+    - ``.env`` 不存在则静默；``python-dotenv`` 没装也静默
+    - 缺这一步时仍可走老路 ``set -a; source .env; set +a``
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=False)
+
+
+_load_dotenv_if_present()
+
+
 from orchestrator.context_packer import ContextPacker
 from orchestrator.dag_loader import instantiate_dag, load_dag
 from orchestrator.failure_handler import FailureHandler

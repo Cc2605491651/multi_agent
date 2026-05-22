@@ -57,6 +57,7 @@
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 cp .env.example .env  # 按需填 ANTHROPIC_API_KEY / DEEPSEEK_API_KEY / E2B_API_KEY ...
+# `python -m orchestrator.main` 启动时会自动加载 .env（已 export 的优先级更高）
 
 # === mock 模式（不打外网；CI / 自测）===
 python -m orchestrator.main demo-phase1 --mock --reset

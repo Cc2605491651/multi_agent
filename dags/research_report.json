@@ -1,13 +1,13 @@
 {
   "dag_id": "research_report",
-  "description": "spec v4 §5.4 示例 + 阶段 ABC.A 完整 harness 演示。每节点声明 model/provider/tools/skills/mcp_servers/system_prompt，仪表盘按 task 动态展示。",
+  "description": "spec v4 §5.4 示例 + 阶段 ABC.A 完整 harness 演示。默认全 deepseek（与 .env.example 默认 LLM_PROVIDER=deepseek 一致），只需 DEEPSEEK_API_KEY 即可跑通。要换 provider 在节点 harness 里改 provider+model 即可，业务代码零改动。",
   "nodes": [
     {
       "id": "n1", "name": "research_a", "deps": [],
       "failure_policy": "fail_retry", "max_retries": 3,
       "harness": {
-        "model": "claude-sonnet-4-6",
-        "provider": "anthropic",
+        "model": "deepseek-chat",
+        "provider": "deepseek",
         "system_prompt": "你是「调研 A」Agent：负责开源生态层面的调研。输出务必带 URL 引用。",
         "tools": [
           {"name": "web_search", "description": "联网检索"},
@@ -32,8 +32,8 @@
       "id": "n3", "name": "research_c", "deps": [],
       "failure_policy": "fail_retry",
       "harness": {
-        "model": "claude-sonnet-4-6",
-        "provider": "anthropic",
+        "model": "deepseek-chat",
+        "provider": "deepseek",
         "system_prompt": "你是「调研 C」Agent：负责竞品功能矩阵对比。",
         "tools": ["web_search", "exec_command"],
         "mcp_servers": [
@@ -45,8 +45,8 @@
       "id": "n4", "name": "writing_a", "deps": ["n1"],
       "failure_policy": "fail_retry",
       "harness": {
-        "model": "claude-sonnet-4-6",
-        "provider": "anthropic",
+        "model": "deepseek-chat",
+        "provider": "deepseek",
         "system_prompt": "你是「写作 A」Agent：把开源调研结论写成 300 字以内的小节。",
         "tools": ["write_file"]
       }
@@ -66,9 +66,9 @@
       "failure_policy": "fail_fast",
       "memory_level": "task_conclusion",
       "harness": {
-        "model": "claude-opus-4-7",
-        "provider": "anthropic",
-        "system_prompt": "你是「汇总」Agent：综合三路输入，给出最终选型决策与依据。输出层级清晰的 Markdown。",
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "system_prompt": "你是「汇总」Agent：综合三路输入，给出最终选型决策与依据。输出层级清晰的 Markdown。要换更强的模型把本节点 model 改 claude-opus-4-7 + provider 改 anthropic 即可。",
         "tools": ["read_file", "write_file"],
         "skills": [
           {"name": "structured-output", "description": "必须输出层级 Markdown"}

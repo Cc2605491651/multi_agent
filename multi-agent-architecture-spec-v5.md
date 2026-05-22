@@ -562,27 +562,58 @@ node.harness 反序列化为 AgentHarness
 向后兼容：harness 任意字段为空都退化到合理默认（无 tool→单轮 respond，无 skill→
 直接用 harness.system_prompt 或 Agent 默认，无 mcp→只用内置工具）。
 
-### 9.7 Planner Agent（未来方向，未实施）
+### 9.7 Planner Agent
 
-> 当前：DAG JSON 手写。`dags/research_report.json` 是 6 节点示例，新增任务需要人工
-> 复制改造一份。
->
-> 方向：增加 `orchestrator/planner.py` + CLI `plan-task --goal "..."`：
->
-> 1. 用户给一句自然语言目标
-> 2. Planner Agent（建议用 `deepseek-chat`，DAG 设计不需要 opus）按 §3.5
->    AgentHarness schema 反向生成 DAG JSON，含每节点 model / provider / system_prompt /
->    tools / skills 自行决定
-> 3. 输出经 `dag_loader.parse_dag` 严格校验；不合规把错误信息回灌给 LLM 重试 ≤2 次
-> 4. 通过校验后直接 `instantiate_dag` + `scheduler.run_task` 跑
->
-> 给 Planner 的能力清单（system prompt 注入）：
-> - 可选 providers：`anthropic` / `openai` / `deepseek` / `openrouter` / `ollama`
-> - 5 个内置 tools：read_file / write_file / exec_command / run_code / web_search
-> - `skills/` 目录下已有的技能（运行时自动扫）
->
-> 工程量估计 4-6h；schema 不变（§3.5 AgentHarness 已能容纳生成结果）。
-> 未实施前用户走「手写 DAG → run-task」流程。
+模块：`orchestrator/planner.py`。把「自然语言目标」转为合规 DAG JSON：
+
+```python
+@dataclass
+class PlannerResult:
+    dag_dict: dict      # 通过 parse_dag 校验的 DAG JSON
+    dag_def: DagDef     # 反序列化后的对象
+    attempts: int       # 尝试次数（含成功那次）
+    raw_outputs: list[str]
+
+class Planner:
+    def __init__(self, llm_client, *, model=None,
+                 max_retries=2, skill_dir=None,
+                 default_provider="deepseek",
+                 default_model="deepseek-chat"): ...
+
+    async def plan(self, goal: str, *, dag_id_hint: str | None = None
+                   ) -> PlannerResult: ...
+```
+
+流程：
+
+1. 把 schema 描述 + 5 个可用 provider + 5 个内置 tool + `skills/` 目录扫描结果
+   注入 system prompt
+2. LLM 输出 → 容忍 markdown 代码块包裹 / 前后闲聊（`_extract_json` 兜底找
+   `{...}`）→ `json.loads` → `dag_loader.parse_dag` 严格校验
+3. 失败把错误回灌给 LLM，重试至多 `max_retries` 次（默认 2，共 3 次尝试）
+4. 全部失败抛 `PlannerError`
+
+**默认推荐**（spec v5 默认全链路一致）：
+
+- 调 Planner 自己用 `deepseek-chat`（DAG 设计不需要 opus）
+- 生成的节点 system prompt 推荐**所有节点**用 `deepseek` + `deepseek-chat`
+- 只在用户明确要求 Claude / GPT 时才换 provider
+
+CLI：
+
+```bash
+python -m orchestrator.main plan-task --goal "调研 3 个国内开源 RAG 框架并选型" \
+    --reset
+# → Planner LLM 生成 DAG JSON
+# → 写到 data/planned_<ts>.json
+# → 直接 instantiate + run-task
+```
+
+`--mock` 模式：用最小 fixture DAG（2 节点 research → summarize），不调 LLM，
+方便离线验证 plan-task 全链路。
+
+工程量实测约 3h（schema 不变，§3.5 AgentHarness 已能容纳生成结果）。
+Planner 是建议系统，不动 dag_loader / scheduler 的边界。
 
 ---
 
@@ -682,9 +713,10 @@ v4 §11 描述了 6 个阶段；v5 标完成状态 + 对应 commit：
 | ABC.A | AgentHarness schema + 5 家 LLM provider | ✅ | `8f262a6` |
 | ABC.B | tool-use 多轮循环 + 5 个内置工具 | ✅ | `f18565a` |
 | ABC.C | skills 加载 + MCP server 集成 | ✅ | `0adb887` |
+| Planner | 自然语言 → DAG（§9.7）+ 4 个真实跑出的 bug 修复 | ✅ | 本次 commit |
 | 6 | CubeSandbox POC + 生产化 | 未实施 | — |
 
-**测试**：235 个 case，约 20 秒全过。
+**测试**：252 个 case，约 22 秒全过（含 14 个 Planner 单测）。
 
 ---
 
@@ -697,7 +729,8 @@ multi_agent/
 │   ├── context_packer.py   # 上下文打包（§8 完整版）
 │   ├── dag_loader.py       # DAG JSON 解析 + 实例化
 │   ├── failure_handler.py  # §5 失败矩阵
-│   ├── main.py             # CLI（demo-phase*/run-task/dashboard-serve/recall-*）
+│   ├── main.py             # CLI（demo-phase*/run-task/plan-task/dashboard-serve/recall-*）
+│   ├── planner.py          # Planner Agent：自然语言 → DAG（§9.7）
 │   ├── recovery.py         # §6.3 三类崩溃恢复扫描
 │   └── scheduler.py        # 并发主循环 + Harness 应用
 ├── storage/
@@ -764,6 +797,7 @@ multi_agent/
 | `orchestrator/dag_loader.py` | 不存在 | DAG JSON 加载 + 实例化 |
 | `orchestrator/failure_handler.py` | 不存在 | §5 落地 |
 | `orchestrator/recovery.py` | 不存在 | §6.3 三类扫描 |
+| `orchestrator/planner.py` | 不存在 | Planner Agent（§9.7） |
 
 ### 14.3 行为修正
 
@@ -791,6 +825,25 @@ ABC 段交付后的二次发现（commit `05b5d08` + `ced8880`）：
 - **`.env` 自动加载**：`orchestrator/main.py` 启动时 `_load_dotenv_if_present`
   读项目根 `.env`（`override=False`，shell export 优先），不再要求用户
   `set -a; source .env`
+
+ABC 后真实跑出的 4 个 bug（commit 见 §12）：
+
+- **示例 DAG 与 README 自相矛盾**：v5 §9 之前 `dags/research_report.json` 6 节点里
+  4 个写死 `provider: anthropic`，README 真实模式只指引填 `DEEPSEEK_API_KEY`，
+  跑起来 4/6 节点 ANTHROPIC_API_KEY not set。改为默认全 deepseek，多 provider
+  演示放节点 system_prompt 注释
+- **distill_model 不跟 harness 切换**（P0）：scheduler 实例化 Agent 时只把
+  `harness.model` 注入 `chat_model`，`distill_model` 死守默认 `claude-haiku-4-5`；
+  非 anthropic provider 跑 distill 时 400 "model not found"。修：scheduler
+  把 chat_model 同步注入 distill_model（同 provider 同模型）。
+  238 测试全过没挡住——测试全 mock，model name 字符串没人验证；要补端到端
+  跑通真 provider 的烟测
+- **chromadb telemetry ERROR 噪音**：`Settings(anonymized_telemetry=False)`
+  不足以压住——chromadb 0.4.15 + posthog 3.x 的 capture() 签名不兼容仍打
+  ERROR。修：`memory_store` 顶部
+  `logging.getLogger("chromadb.telemetry.product.posthog").setLevel(CRITICAL)`
+- **测试数文档过期**：v5 / README 写 235，实际 ABC + .env 自动加载后已 238，
+  本次加 Planner + plan-task + bug fix 后 252。同步
 
 ### 14.4 新增哲学
 
@@ -842,7 +895,9 @@ v4 §13 大部分还有效，v5 补几条：
 | R-5.4 | E2B 按用量计费 | 失控烧钱 | 默认 local；重要 demo 才切 e2b；监控 dashboard.usage |
 | R-5.5 | tool_loop max_turns=10 是经验值 | 复杂任务可能不够 | 节点级 harness 留口扩展（暂未暴露到 schema） |
 | R-5.6 | `LLM_PROVIDER` 代码 fallback 与 `.env.example` 默认不一致（前者 anthropic，后者 deepseek） | CI / 无 `.env` 环境跑到 anthropic 分支 | 故意保留：CI 全 mock 不真打外网无影响；开发期复制 `.env.example` 后落到 deepseek |
-| R-5.7 | DAG JSON 手写门槛 | 新场景需要人工设计节点拆分 + harness | 长期 §9.7 Planner Agent；短期复制 `dags/research_report.json` 改 |
+| R-5.7 | ~~DAG JSON 手写门槛~~ | ~~新场景需要人工设计~~ | **已修**：§9.7 Planner Agent + `plan-task` CLI 落地 |
+| R-5.8 | Planner LLM 可能稳定性差（输出非 JSON / schema 漂） | plan-task 真实模式偶发失败 | max_retries=2 自动回灌错误重试；耗尽抛 PlannerError；CLI 用 deepseek-chat 实测稳定 |
+| R-5.9 | mock 测试无法覆盖 distill_model 字段是否对得上真 provider | 类型问题不会被 pytest 抓出 | 端到端真跑加进 release checklist；spec v5 §14.3 注明 |
 
 ---
 

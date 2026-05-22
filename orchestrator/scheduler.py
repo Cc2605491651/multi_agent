@@ -310,6 +310,10 @@ class Scheduler:
             agent_kwargs: dict = {"agent_id": node.node_name, "client": client}
             if chat_model:
                 agent_kwargs["chat_model"] = chat_model
+                # spec D-1.1 原推荐 distill 用 haiku；ABC.A 起 provider 可换非
+                # anthropic（如 deepseek），claude-haiku-4-5 在那家不存在会 400。
+                # 统一让 distill 用 chat_model（同 provider 同模型），避免跨家漏配。
+                agent_kwargs["distill_model"] = chat_model
             if final_system:
                 agent_kwargs["system_prompt"] = final_system
             agent = Agent(**agent_kwargs)

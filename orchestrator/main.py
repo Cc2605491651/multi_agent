@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import uuid
@@ -44,6 +45,7 @@ _load_dotenv_if_present()
 from orchestrator.context_packer import ContextPacker
 from orchestrator.dag_loader import instantiate_dag, load_dag
 from orchestrator.failure_handler import FailureHandler
+from orchestrator.planner import Planner, PlannerError
 from orchestrator.recovery import Recovery
 from orchestrator.scheduler import Scheduler
 from storage.memory_store import MemoryStore
@@ -1040,6 +1042,89 @@ async def run_recall_baseline_v2(*, k: int = 5) -> int:
     return 0
 
 
+# ============ Planner Agent：plan-task ============
+
+# mock 模式用的最小 fixture DAG（自然语言 → DAG 完全离线演示）
+_PLAN_TASK_FIXTURE = {
+    "dag_id": "planned_demo",
+    "description": "Planner mock 输出（无 LLM 调用）",
+    "nodes": [
+        {
+            "id": "n1", "name": "research", "deps": [],
+            "failure_policy": "fail_retry",
+            "harness": {
+                "model": "deepseek-chat", "provider": "deepseek",
+                "system_prompt": "你是「调研」Agent，把用户目标拆成 3 条关键事实。",
+                "tools": ["web_search"],
+            },
+        },
+        {
+            "id": "n2", "name": "summarize", "deps": ["n1"],
+            "failure_policy": "fail_fast",
+            "memory_level": "task_conclusion",
+            "harness": {
+                "model": "deepseek-chat", "provider": "deepseek",
+                "system_prompt": "你是「汇总」Agent，输出层级 Markdown 报告。",
+                "tools": ["write_file"],
+                "skills": [{"name": "structured-output"}],
+            },
+        },
+    ],
+}
+
+
+async def run_plan_task(
+    *,
+    goal: str,
+    out_path: str | None,
+    mock: bool,
+    reset: bool,
+    max_concurrent: int,
+    user_id: str,
+) -> int:
+    """plan-task：用 Planner 把目标转成 DAG JSON，落盘后直接 run-task。"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    if mock:
+        dag_dict = _PLAN_TASK_FIXTURE
+        print("[plan-task] mock 模式：使用 fixture DAG（不调 LLM）")
+    else:
+        try:
+            client = default_client()
+        except RuntimeError as e:
+            print(f"[plan-task] {e}", file=sys.stderr)
+            return 2
+        planner = Planner(client)
+        print(f"[plan-task] 调 LLM 设计 DAG，目标：{goal}")
+        try:
+            result = await planner.plan(goal)
+        except PlannerError as e:
+            print(f"[plan-task] Planner 失败：{e}", file=sys.stderr)
+            return 3
+        dag_dict = result.dag_dict
+        print(
+            f"[plan-task] Planner OK（{result.attempts} 次尝试）："
+            f"{dag_dict.get('dag_id')} | {len(dag_dict.get('nodes', []))} 节点"
+        )
+
+    if not out_path:
+        import time
+
+        out_path = str(DATA_DIR / f"planned_{int(time.time())}.json")
+    Path(out_path).write_text(
+        json.dumps(dag_dict, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"[plan-task] DAG 已写入 {out_path}")
+
+    # 复用 run_task_cli 跑出来
+    return await run_task_cli(
+        dag_path=out_path, title=goal,
+        handoff_conv=None, handoff_range=None,
+        user_id=user_id, mock=mock, reset=reset,
+        max_concurrent=max_concurrent,
+    )
+
+
 # ============ 阶段 5 dashboard-serve ============
 
 
@@ -1120,6 +1205,17 @@ def main() -> int:
     p_dash.add_argument("--host", default="127.0.0.1")
     p_dash.add_argument("--port", type=int, default=8000)
 
+    p_plan = sub.add_parser(
+        "plan-task",
+        help="Planner Agent：自然语言目标 → DAG JSON → 直接 run-task（spec v5 §9.7）",
+    )
+    p_plan.add_argument("--goal", required=True, help="任务的自然语言描述")
+    p_plan.add_argument("--out", default=None, help="DAG 落盘路径；默认 data/planned_<ts>.json")
+    p_plan.add_argument("--user-id", default="default_user")
+    p_plan.add_argument("--mock", action="store_true", help="不调 LLM，用 fixture DAG")
+    p_plan.add_argument("--reset", action="store_true")
+    p_plan.add_argument("--max-concurrent", type=int, default=3)
+
     p_drift = sub.add_parser(
         "recall-drift", help="阶段 3 任务 3.6 对比实验：id 取 vs 语义召回飘移"
     )
@@ -1169,6 +1265,12 @@ def main() -> int:
         return asyncio.run(run_recall_drift(k=args.k))
     if args.cmd == "dashboard-serve":
         return run_dashboard_serve(host=args.host, port=args.port)
+    if args.cmd == "plan-task":
+        return asyncio.run(run_plan_task(
+            goal=args.goal, out_path=args.out, mock=args.mock,
+            reset=args.reset, max_concurrent=args.max_concurrent,
+            user_id=args.user_id,
+        ))
     return 1
 
 

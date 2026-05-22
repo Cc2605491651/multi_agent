@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-主线 plan §1-§5 + ABC 完整 Harness 体系全部交付，**235 测试全过（~20s）**。
+主线 plan §1-§5 + ABC 完整 Harness 体系 + **Planner Agent**（自然语言 → DAG）全部交付，**252 测试全过（~22s）**。
 
 - **阶段 1（单 Agent + 记忆库）**：✅
   - `storage/transcript_store.py` SQLite 对话原文（async / `asyncio.to_thread`）
@@ -51,6 +51,13 @@
   - **B 段**（commit `f18565a`）：5 个内置 tool（read_file / write_file / exec_command / run_code / web_search）走 SandboxBackend；Anthropic + OpenAI 双家 tool_use loop（max_turns 保护、tool_result 回填、错误记录）
   - **C 段**（commit `0adb887`）：`SkillLoader` 加载 markdown 指令包（项目 `skills/` + 用户 `~/.claude/skills/` 双查找）；`MCPClient` stdio JSON-RPC 2.0；MCP tools 自动 prefix 合入 ToolRegistry；单 server 失败容忍
 
+- **Planner Agent（spec v5 §9.7）**：✅
+  - `orchestrator/planner.py`：把自然语言目标转成合规 DAG JSON
+  - system prompt 注入 schema + 可用 providers/tools/skills；输出严格 parse_dag 校验；不合规把错误回灌重试 ≤2 次
+  - 默认走 `deepseek-chat`（DAG 设计不需要 opus，便宜大碗）
+  - CLI `plan-task --goal "..."`：plan → 写 data/planned_<ts>.json → 直接 run-task 一条龙
+  - 配套修了 4 个真实跑端到端发现的 bug（详见 spec v5 §14.3 后段）
+
 ## 运行
 
 ```bash
@@ -69,6 +76,12 @@ python -m orchestrator.main run-task --dag dags/research_report.json \
     --title "选型决策任务" --mock --reset
 python -m orchestrator.main run-task --dag dags/research_report.json \
     --title "..." --handoff-conv conv_abc --handoff-range 1,5 --mock
+
+# === Planner Agent：自然语言 → DAG 一条龙（spec v5 §9.7）===
+python -m orchestrator.main plan-task --goal "调研 3 个国内开源 RAG 框架并选型" \
+    --reset                # 真实模式调 LLM 生成 DAG
+python -m orchestrator.main plan-task --goal "随便什么" --mock --reset
+                          # mock 模式用 fixture DAG（不调 LLM）
 
 # === 真实 LLM 模式 ===
 export ANTHROPIC_API_KEY=...           # 或换 LLM_PROVIDER=deepseek + DEEPSEEK_API_KEY

@@ -11,12 +11,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# chromadb 0.4.15 + posthog 3.x 的 capture() 签名不兼容；anonymized_telemetry=False
+# 不够，posthog hook 仍会被调用并打 ERROR。直接把这个 logger 压成 CRITICAL。
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
 
 import chromadb
 from chromadb.config import Settings

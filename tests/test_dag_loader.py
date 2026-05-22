@@ -211,13 +211,17 @@ async def test_instantiate_writes_model_and_tools(tmp_path: Path) -> None:
 
 
 async def test_loaded_5_4_dag_has_per_node_models(tmp_path: Path) -> None:
-    """阶段 5 起 dags/research_report.json 每节点都标注 model + tools。"""
+    """dags/research_report.json 每节点都标注 model + tools。
+
+    阶段 5 起每节点都有 harness；ABC 后调整为默认全 deepseek（避免新人只填
+    DEEPSEEK_API_KEY 时部分节点炸）。多 provider 演示放节点 system_prompt 注释。
+    """
     state = StateStore(tmp_path / "state.db")
     path = Path(__file__).resolve().parent.parent / "dags" / "research_report.json"
     d = load_dag(path)
     _, mapping = await instantiate_dag(state, d, user_id="u", title="t")
     summarize = await state.get_dag_node(mapping["n6"])
-    assert summarize.model_name == "claude-opus-4-7"
+    assert summarize.model_name == "deepseek-chat"
     assert summarize.memory_level == "task_conclusion"
     assert "write_file" in summarize.tools
 

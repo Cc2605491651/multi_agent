@@ -70,23 +70,40 @@ class LocalBackend(SandboxBackend):
     - ``run_code``：把 ``code`` 写到临时 ``.py`` 后用当前 Python 解释器跑。
     """
 
-    def __init__(self, root_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        root_dir: str | Path | None = None,
+        workdir: str | Path | None = None,
+    ) -> None:
+        """``workdir`` 非空时所有节点直接共用此目录（agent 能读写你的项目文件）；
+        否则每节点开一个临时子目录（安全隔离）。
+        """
         self._root = Path(root_dir) if root_dir else Path(tempfile.gettempdir()) / "ma_local_sandbox"
         self._root.mkdir(parents=True, exist_ok=True)
+        self._mounted_workdir = Path(workdir).expanduser().resolve() if workdir else None
         # handle -> 当前在跑的 asyncio.subprocess.Process（若有）
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         self._cancelled: set[str] = set()
 
     async def create(self, context_package: str) -> SandboxHandle:
         sid = str(uuid.uuid4())
-        workdir = self._root / sid
-        workdir.mkdir(parents=True, exist_ok=False)
-        (workdir / "context.txt").write_text(context_package, encoding="utf-8")
+        if self._mounted_workdir is not None:
+            # 挂载用户项目目录：所有节点共享同一个 workdir
+            self._mounted_workdir.mkdir(parents=True, exist_ok=True)
+            workdir = self._mounted_workdir
+            # context_package 落在 .multi_agent/<sid>.ctx 子目录，避免污染用户项目根
+            ctx_dir = workdir / ".multi_agent"
+            ctx_dir.mkdir(parents=True, exist_ok=True)
+            (ctx_dir / f"{sid}.ctx").write_text(context_package, encoding="utf-8")
+        else:
+            workdir = self._root / sid
+            workdir.mkdir(parents=True, exist_ok=False)
+            (workdir / "context.txt").write_text(context_package, encoding="utf-8")
         return SandboxHandle(
             sandbox_id=sid,
             backend="local",
             created_at=_utcnow_iso(),
-            metadata={"workdir": str(workdir)},
+            metadata={"workdir": str(workdir), "mounted": self._mounted_workdir is not None},
         )
 
     async def destroy(self, handle: SandboxHandle) -> None:
@@ -98,6 +115,12 @@ class LocalBackend(SandboxBackend):
             except ProcessLookupError:
                 pass
         self._cancelled.discard(handle.sandbox_id)
+        # 仅在「非挂载」模式下删 workdir（挂载模式不能删用户的项目目录！）
+        if handle.metadata and handle.metadata.get("mounted"):
+            ctx_file = Path(handle.metadata["workdir"]) / ".multi_agent" / f"{handle.sandbox_id}.ctx"
+            try: ctx_file.unlink()
+            except (OSError, FileNotFoundError): pass
+            return
         workdir = Path(handle.metadata["workdir"]) if handle.metadata else None
         if workdir and workdir.exists():
             shutil.rmtree(workdir, ignore_errors=True)
@@ -179,15 +202,21 @@ def shlex_quote(s: str) -> str:
     return shlex.quote(s)
 
 
-def make_sandbox(backend: str | None = None) -> SandboxBackend:
+def make_sandbox(
+    backend: str | None = None,
+    workdir: str | Path | None = None,
+) -> SandboxBackend:
     """按 ``SANDBOX_BACKEND`` 环境变量选 backend；上层不感知具体实现。
 
     - ``local``（默认）：``LocalBackend``，本机跑，无隔离，无费用
     - ``e2b``：``E2BBackend``，云端沙箱，需 ``E2B_API_KEY``
+    - ``workdir``：若设，LocalBackend 用此目录作 agent 工作目录（agent 能直接
+      读写这个项目里的文件）；E2B 后端忽略此参数（云端 sandbox 隔离独立目录）
     """
     backend = (backend or os.environ.get("SANDBOX_BACKEND", "local")).strip().lower()
+    workdir = workdir or os.environ.get("MA_WORKDIR")
     if backend == "local":
-        return LocalBackend()
+        return LocalBackend(workdir=workdir)
     if backend == "e2b":
         from worker.sandbox_e2b import E2BBackend
 

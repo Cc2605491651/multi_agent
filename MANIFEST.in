@@ -1,0 +1,12 @@
+include README.md
+include LICENSE
+include multi-agent-architecture-spec-v6.md
+include .env.example
+recursive-include dashboard *.html *.css *.js
+recursive-include dags *.json
+recursive-include skills *.md
+recursive-exclude tests *
+recursive-exclude data *
+recursive-exclude .venv *
+recursive-exclude __pycache__ *
+global-exclude *.pyc

@@ -54,7 +54,24 @@ from storage.transcript_store import TranscriptStore
 from worker.agent import Agent, default_client
 from worker.sandbox import make_sandbox
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+def _resolve_data_dir() -> Path:
+    """数据目录解析优先级（从高到低）：
+    1. MA_DATA_DIR 环境变量
+    2. 当前工作目录下已存在的 ./data/（不破坏开发期习惯）
+    3. ~/.multi_agent_tool/（pipx 全局安装默认）
+    """
+    import os as _os
+
+    env_dir = _os.environ.get("MA_DATA_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser().resolve()
+    cwd_data = Path.cwd() / "data"
+    if cwd_data.is_dir():
+        return cwd_data.resolve()
+    return Path.home() / ".multi_agent_tool"
+
+
+DATA_DIR = _resolve_data_dir()
 TRANSCRIPT_DB = DATA_DIR / "transcript.db"
 CHROMA_DIR = DATA_DIR / "chroma"
 STATE_DB = DATA_DIR / "state.db"
@@ -817,6 +834,7 @@ async def run_task_cli(
     mock: bool,
     reset: bool,
     max_concurrent: int,
+    workdir: str | None = None,
 ) -> int:
     if reset:
         import shutil
@@ -831,7 +849,7 @@ async def run_task_cli(
     transcript_store = TranscriptStore(TRANSCRIPT_DB)
     memory_store = MemoryStore(CHROMA_DIR)
     state_store = StateStore(STATE_DB)
-    sandbox = make_sandbox()
+    sandbox = make_sandbox(workdir=workdir)
     recovery = Recovery(state_store, memory_store, stale_seconds=300)
     packer = ContextPacker(
         state_store=state_store,
@@ -1081,6 +1099,7 @@ async def run_plan_task(
     reset: bool,
     max_concurrent: int,
     user_id: str,
+    workdir: str | None = None,
 ) -> int:
     """plan-task：用 Planner 把目标转成 DAG JSON，落盘后直接 run-task。"""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -1122,6 +1141,7 @@ async def run_plan_task(
         handoff_conv=None, handoff_range=None,
         user_id=user_id, mock=mock, reset=reset,
         max_concurrent=max_concurrent,
+        workdir=workdir,
     )
 
 
@@ -1147,7 +1167,13 @@ def run_dashboard_serve(*, host: str, port: int) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="orchestrator")
+    # 不带子命令 / 只有 multi-agent → 进交互向导
+    if len(sys.argv) == 1:
+        from orchestrator.wizard import run_wizard
+
+        return run_wizard()
+
+    parser = argparse.ArgumentParser(prog="multi-agent")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_demo1 = sub.add_parser("demo-phase1", help="阶段 1 端到端 demo")
@@ -1189,6 +1215,10 @@ def main() -> int:
     p_run.add_argument("--mock", action="store_true")
     p_run.add_argument("--reset", action="store_true")
     p_run.add_argument("--max-concurrent", type=int, default=3)
+    p_run.add_argument(
+        "--workdir", default=None,
+        help="让 agent 在指定目录工作（直接读写你的项目文件，请勿对未版本控制目录使用）",
+    )
 
     p_recall = sub.add_parser("recall-baseline", help="阶段 1 任务 1.11 召回基线")
     p_recall.add_argument("-k", type=int, default=5)
@@ -1215,6 +1245,10 @@ def main() -> int:
     p_plan.add_argument("--mock", action="store_true", help="不调 LLM，用 fixture DAG")
     p_plan.add_argument("--reset", action="store_true")
     p_plan.add_argument("--max-concurrent", type=int, default=3)
+    p_plan.add_argument(
+        "--workdir", default=None,
+        help="让 agent 在指定目录工作（直接读写你的项目文件，请勿对未版本控制目录使用）",
+    )
 
     p_drift = sub.add_parser(
         "recall-drift", help="阶段 3 任务 3.6 对比实验：id 取 vs 语义召回飘移"
@@ -1255,6 +1289,7 @@ def main() -> int:
                 mock=args.mock,
                 reset=args.reset,
                 max_concurrent=args.max_concurrent,
+                workdir=args.workdir,
             )
         )
     if args.cmd == "recall-baseline":
@@ -1269,7 +1304,7 @@ def main() -> int:
         return asyncio.run(run_plan_task(
             goal=args.goal, out_path=args.out, mock=args.mock,
             reset=args.reset, max_concurrent=args.max_concurrent,
-            user_id=args.user_id,
+            user_id=args.user_id, workdir=args.workdir,
         ))
     return 1
 

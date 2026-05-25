@@ -1,8 +1,23 @@
 [project]
-name = "multi-agent-system"
-version = "0.1.0"
-description = "Multi-agent collaboration system (spec v4)"
+name = "multi-agent-tool"
+version = "0.6.0"
+description = "多 Agent 协作运行时——脚手架 + 运行时观察台（spec v6 真协作 / 多 LLM provider / GSAP 仪表盘）"
+authors = [{ name = "cuiyuntao", email = "c2605491651@gmail.com" }]
+license = { text = "MIT" }
+readme = "README.md"
 requires-python = ">=3.11"
+keywords = ["multi-agent", "agent", "llm", "rag", "anthropic", "deepseek", "mcp", "dashboard"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+]
 dependencies = [
     "chromadb==0.4.15",
     "sentence-transformers>=2.2.2",
@@ -12,6 +27,8 @@ dependencies = [
     "uvicorn>=0.27",
     "e2b>=2.0",
     "python-dotenv>=1.0",
+    "questionary>=2.0",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -19,14 +36,32 @@ dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
     "pytest-timeout>=2.3",
+    "build>=1.0",
+    "twine>=4.0",
 ]
 
+[project.scripts]
+multi-agent = "orchestrator.main:main"
+
+[project.urls]
+Homepage = "https://github.com/Cc2605491651/multi_agent"
+Repository = "https://github.com/Cc2605491651/multi_agent"
+Issues = "https://github.com/Cc2605491651/multi_agent/issues"
+
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["orchestrator*", "worker*", "storage*"]
+include = ["orchestrator*", "worker*", "storage*", "dashboard*", "skills*", "dags*"]
+
+[tool.setuptools.package-data]
+"dashboard" = ["*.html", "*.css", "*.js"]
+"skills" = ["*.md"]
+"dags" = ["*.json"]
+
+[tool.setuptools]
+include-package-data = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

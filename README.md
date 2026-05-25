@@ -2,6 +2,27 @@
 
 多 Agent 协作系统。架构按 **spec v5**（v4 留作初心档案）。
 
+## 安装
+
+```bash
+# 推荐（CLI 隔离，不污染全局 Python）
+pipx install multi-agent-tool
+
+# 或一次性临时跑（uv 用户）
+uvx --from multi-agent-tool multi-agent
+
+# 装完直接敲：进交互向导，零命令记忆
+multi-agent
+```
+
+可选环境变量：
+- `DEEPSEEK_API_KEY`（默认 LLM，1 块钱跑几十次）
+- `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY`（任选其一）
+- `MA_DATA_DIR`（数据落地目录，默认 `~/.multi_agent_tool`）
+- `MA_WORKDIR`（agent 工作目录，让它直接读写你的项目）
+
+PyPI 页面：https://pypi.org/project/multi-agent-tool/
+
 ## 当前状态
 
 主线 plan §1-§5 + ABC 完整 Harness 体系 + **Planner Agent**（自然语言 → DAG）+ **v6 真协作**（多轮 transcript + 节点级接力）+ **蜡笔小新风 UI**（GSAP + rough.js + dagre）全部交付，**268 测试全过（~25s）**。

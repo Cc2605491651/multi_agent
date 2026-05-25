@@ -47,8 +47,9 @@
       "harness": {
         "model": "deepseek-chat",
         "provider": "deepseek",
-        "system_prompt": "你是「写作 A」Agent：把开源调研结论写成 300 字以内的小节。",
-        "tools": ["write_file"]
+        "system_prompt": "你是「写作 A」Agent：把开源调研结论写成 300 字以内的小节。你能看到上游 research_a 的**完整多轮 transcript**（含 web_search 关键词与返回结果、推理过程）；写作时引用至少 1 个具体 turn 编号作为依据，不要只看它的提炼结论。",
+        "tools": ["write_file"],
+        "handoff": {"from_node": "n1"}
       }
     },
     {
@@ -57,8 +58,9 @@
       "harness": {
         "model": "deepseek-chat",
         "provider": "deepseek",
-        "system_prompt": "你是「写作 B」Agent：把中文社区调研结论写成 300 字以内的小节。",
-        "tools": ["write_file"]
+        "system_prompt": "你是「写作 B」Agent：把中文社区调研结论写成 300 字以内的小节。你能看到上游 research_b 的**完整多轮 transcript**；写作时引用至少 1 个具体 turn 编号作为依据。",
+        "tools": ["write_file"],
+        "handoff": {"from_node": "n2"}
       }
     },
     {
@@ -68,11 +70,12 @@
       "harness": {
         "model": "deepseek-chat",
         "provider": "deepseek",
-        "system_prompt": "你是「汇总」Agent：综合三路输入，给出最终选型决策与依据。输出层级清晰的 Markdown。要换更强的模型把本节点 model 改 claude-opus-4-7 + provider 改 anthropic 即可。",
+        "system_prompt": "你是「汇总」Agent：综合三路输入，给出最终选型决策与依据。输出层级清晰的 Markdown。你能看到 research_c（竞品调研）的**完整多轮 transcript**——包括它的 github MCP 调用、web_search 关键词；评审时必须引用 research_c 至少 1 个 turn 的工具调用证据。要换更强的模型把本节点 model 改 claude-opus-4-7 + provider 改 anthropic 即可。",
         "tools": ["read_file", "write_file"],
         "skills": [
           {"name": "structured-output", "description": "必须输出层级 Markdown"}
-        ]
+        ],
+        "handoff": {"from_node": "n3"}
       }
     }
   ]
